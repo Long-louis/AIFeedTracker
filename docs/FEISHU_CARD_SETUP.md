@@ -69,29 +69,19 @@
 
 ## 配置到项目
 
-### 更新 config.py
-
-打开 `config.py` 文件，更新飞书配置：
-
-```python
-# 飞书配置
-FEISHU_CONFIG = {
-    "app_id": os.getenv("app_id"),
-    "app_secret": os.getenv("app_secret"),
-    "template_id": "YOUR_TEMPLATE_ID",  # 替换为您的模板ID
-    "template_version_name": "1.0.0",    # 替换为您的版本名称
-    "user_open_id": "ou_xxx...",         # 接收消息的用户open_id
-}
-```
-
 ### 更新 .env 文件
 
 ```env
 # 飞书应用配置
 app_id=cli_xxxxxxxxxxxxx
 app_secret=xxxxxxxxxxxxxxxxxxxxx
+
+# 飞书消息配置
+FEISHU_TEMPLATE_ID=您的消息模板ID
+FEISHU_TEMPLATE_VERSION=您的消息模板版本
+FEISHU_USER_OPEN_ID=您的用户open_id
 ```
 
 ### 获取用户 open_id
 
-请查看飞书文档
+请查看[飞书文档](https://open.feishu.cn/document/server-docs/contact-v3/user/batch_get_id?appId=cli_a8675b0dfcc3500d)

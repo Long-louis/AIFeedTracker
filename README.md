@@ -169,6 +169,46 @@ uninstall_service.bat
 run_background.bat
 ```
 
+#### 方式四：Docker
+
+```bash
+# 生成你的配置文件
+cp env.example myenv.txt
+
+# 编辑 myenv.txt
+
+# 生成你的监控博主信息文件
+cp data/bilibili_creators.json.example bilibili_creators.json
+
+# 编辑 bilibili_creators.json
+
+# 复制配置文件到任意位置 (替换{my-config-path}为实际路径)
+cp myenv.txt {my-config-path}/myenv.txt
+cp bilibili_creators.json {my-config-path}/bilibili_creators.json
+
+# 使用 Docker 运行
+## 自行构建 Docker 镜像运行 (替换{my-config-path}为实际路径)
+docker build -t ai-feed-tracker .
+docker run -d \
+  --name ai-feed-tracker \
+  --restart=unless-stopped \
+  --env-file {my-config-path}/myenv.txt \
+  -v {my-config-path}/bilibili_creators.json:/app/data/bilibili_creators.json \
+  ai-feed-tracker:latest
+  
+## 使用我提供的 Docker 镜像运行 (替换{my-config-path}为实际路径)
+docker run -d \
+  --name ai-feed-tracker \
+  --restart=unless-stopped \
+  --env-file {my-config-path}/myenv.txt \
+  -v {my-config-path}/bilibili_creators.json:/app/data/bilibili_creators.json \
+  -e TZ=Asia/Shanghai \
+  hup2c/ai-feed-tracker:latest
+
+## 查看日志
+docker logs -f ai-feed-tracker
+```
+
 ## 📚 文档
 
 完整文档请查看 [docs/](./docs/) 目录：

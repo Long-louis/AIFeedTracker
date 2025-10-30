@@ -81,6 +81,7 @@ class MonitorService:
 
     STATE_PATH = os.path.join("data", "bilibili_state.json")
     CREATORS_PATH = os.path.join("data", "bilibili_creators.json")
+    ERROR_NOTIFY_COOLDOWN = 1800  # API错误通知冷却时间（秒）
 
     def __init__(self, feishu_bot=None, summarizer=None, cookie: Optional[str] = None):
         """
@@ -103,6 +104,7 @@ class MonitorService:
         # 初始化评论获取服务
         self.comment_fetcher = None
         self._init_comment_fetcher()
+        self._api_error_cache: Dict[Tuple[int, Any], Dict[str, Any]] = {}
 
     def _init_comment_fetcher(self) -> None:
         """初始化评论获取服务"""
@@ -129,6 +131,34 @@ class MonitorService:
         except Exception as e:
             self.logger.warning(f"评论获取服务初始化失败: {e}")
             self.comment_fetcher = None
+
+    def _should_notify_api_error(
+        self, creator: Creator, error_code: Any, error_message: Any
+    ) -> bool:
+        """判断是否需要发送API错误通知，避免频繁推送"""
+
+        now = time.time()
+        key = (creator.uid, error_code)
+        cached = self._api_error_cache.get(key)
+
+        # 清理缓存中过期的记录
+        if cached is None and self._api_error_cache:
+            expire_before = now - self.ERROR_NOTIFY_COOLDOWN * 2
+            self._api_error_cache = {
+                k: v for k, v in self._api_error_cache.items() if v["timestamp"] >= expire_before
+            }
+
+        if cached:
+            same_message = cached.get("message") == error_message
+            within_cooldown = now - cached.get("timestamp", 0) < self.ERROR_NOTIFY_COOLDOWN
+            if same_message and within_cooldown:
+                return False
+
+        self._api_error_cache[key] = {
+            "timestamp": now,
+            "message": error_message,
+        }
+        return True
 
     @staticmethod
     def get_publish_time(item: Dict[str, Any]) -> str:
@@ -382,7 +412,9 @@ class MonitorService:
                 error_msg = f"API返回错误: code={data.get('code')}, message={data.get('message')}"
                 self.logger.warning(f"{creator.name} ({creator.uid}) - {error_msg}")
                 # 发送API错误通知
-                if self.feishu_bot:
+                if self.feishu_bot and self._should_notify_api_error(
+                    creator, data.get("code"), data.get("message")
+                ):
                     try:
                         await self.feishu_bot.send_system_notification(
                             self.feishu_bot.LEVEL_WARNING,
@@ -391,6 +423,10 @@ class MonitorService:
                         )
                     except Exception:
                         pass
+                elif self.feishu_bot:
+                    self.logger.debug(
+                        "API错误通知已在冷却时间内，跳过飞书推送"
+                    )
             else:
                 self.logger.info(
                     f"No items for {creator.name} ({creator.uid}) - 该用户可能没有发布动态"

@@ -39,7 +39,7 @@ class Creator:
 
 
 class JsonState:
-    """JSON文件状态管理器"""
+    """JSON文件状态管理器（运行时状态，不属于用户配置）"""
 
     def __init__(self, path: str):
         self.path = path
@@ -68,8 +68,7 @@ class JsonState:
 
     def set_last_seen(self, uid: int, dynamic_id: str) -> None:
         entry = self.state.setdefault(str(uid), {})
-        entry["last_seen"] = dynamic_id
-        entry.setdefault("seen", []).append(dynamic_id)
+        entry["last_seen"] = str(dynamic_id)
 
 
 class MonitorService:
@@ -78,6 +77,7 @@ class MonitorService:
     DYNAMIC_PC_URL = "https://t.bilibili.com/{dynamic_id}"
     VIDEO_PC_URL = "https://www.bilibili.com/video/{bvid}"
 
+    # 运行时状态文件：只用于去重/断点续跑，已在 .gitignore 忽略
     STATE_PATH = os.path.join("data", "bilibili_state.json")
     CREATORS_PATH = os.path.join("data", "bilibili_creators.json")
 
@@ -93,8 +93,12 @@ class MonitorService:
         self.feishu_bot = feishu_bot
         self.summarizer = summarizer
         self.cookie = cookie
-        self.state = JsonState(self.STATE_PATH)
         self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
+
+        self.state = JsonState(self.STATE_PATH)
+
+        # 是否允许在启动/首次缺少 last_seen 时补发（默认关闭：避免重启刷屏）
+        self._allow_backfill_on_start = False
 
         # 创建统一凭证（依赖 config.py 中的环境变量）
         self.credential = build_bilibili_credential()
@@ -126,7 +130,7 @@ class MonitorService:
             if author and isinstance(author, dict):
                 pub_ts = author.get("pub_ts")
                 if pub_ts:
-                    dt = datetime.fromtimestamp(pub_ts)
+                    dt = datetime.fromtimestamp(int(pub_ts))
                     return f"发布时间：{dt.strftime('%Y-%m-%d %H:%M:%S')}"
 
                 pub_time = author.get("pub_time")
@@ -354,10 +358,23 @@ class MonitorService:
 
         last_seen = self.state.get_last_seen(creator.uid)
         if last_seen is None:
-            # 首次运行，推送最新的3个动态（如果有的话）
-            self.logger.info(f"首次监控 {creator.name}，将推送最新的几条动态")
+            # 默认策略（A）：不补发历史，只对齐游标到当前最新。
+            # 若用户显式开启补发（如 --reset），才会推送近期动态。
+            if not self._allow_backfill_on_start:
+                newest_id = items[0].get("id_str") or items[0].get("id")
+                if newest_id:
+                    self.state.set_last_seen(creator.uid, str(newest_id))
+                    self.state.save()
+                self.logger.info(
+                    f"首次/重启对齐：{creator.name} 已设置 last_seen，不补发历史动态"
+                )
+                return
 
-            # 获取最近48小时内的动态，但最多推送3条
+            # 补发模式：推送最近48小时内最多3条（显式触发，如 --reset）
+            self.logger.info(
+                f"首次监控 {creator.name}（补发模式），将推送最新的几条动态"
+            )
+
             current_time = time.time()
             time_window_hours = 48
             time_window_seconds = time_window_hours * 3600
@@ -370,35 +387,27 @@ class MonitorService:
                 item_timestamp = self.get_publish_timestamp(item)
                 if item_timestamp >= earliest_allowed_timestamp:
                     initial_items.append(item)
-                    if len(initial_items) >= 3:  # 最多推送3条
+                    if len(initial_items) >= 3:
                         break
 
             if initial_items:
-                # 按时间顺序处理（从旧到新）
                 initial_items.sort(key=self.get_publish_timestamp)
-
                 self.logger.info(
-                    f"首次运行：为 {creator.name} 推送 {len(initial_items)} 条最新动态"
+                    f"补发模式：为 {creator.name} 推送 {len(initial_items)} 条最新动态"
                 )
-
                 for it in initial_items:
                     await self._process_dynamic_item(it, creator)
 
-                # 设置最新的为已看过
                 newest_processed = str(
                     initial_items[-1].get("id_str") or initial_items[-1].get("id")
                 )
                 self.state.set_last_seen(creator.uid, newest_processed)
                 self.state.save()
             else:
-                # 如果没有符合条件的动态，设置最新动态为已看过
                 newest_id = items[0].get("id_str") or items[0].get("id")
                 if newest_id:
                     self.state.set_last_seen(creator.uid, str(newest_id))
                     self.state.save()
-                    self.logger.info(
-                        f"首次运行：{creator.name} 没有最近48小时内的动态，已初始化状态"
-                    )
             return
 
         # 找到上次看过的动态的时间戳
@@ -648,7 +657,10 @@ class MonitorService:
                 await asyncio.sleep(60)
 
     async def start_monitoring(
-        self, creators: List[Creator], once: bool = False
+        self,
+        creators: List[Creator],
+        once: bool = False,
+        backfill_on_start: bool = False,
     ) -> None:
         """
         启动监控
@@ -667,6 +679,13 @@ class MonitorService:
                     self.logger.info("凭证刷新完成")
             except Exception as e:
                 self.logger.warning(f"凭证刷新检查失败: {e}")
+
+        # A 策略：启动时对齐 last_seen 到当前最新（不补发）。
+        # 若显式开启 backfill_on_start（例如 --reset），则跳过对齐，允许补发。
+        self._allow_backfill_on_start = bool(backfill_on_start)
+
+        if not self._allow_backfill_on_start:
+            await self._prime_last_seen(creators)
 
         if once:
             # 一次性检查模式
@@ -699,19 +718,34 @@ class MonitorService:
                     task.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
 
+    async def _prime_last_seen(self, creators: List[Creator]) -> None:
+        """启动时对齐每个 UP 的 last_seen 到当前最新，不发送任何通知。"""
+        if not creators:
+            return
+
+        for c in creators:
+            try:
+                data = await self.fetch_user_space_dynamics(c.uid, 1)
+                items = data.get("data", {}).get("items", []) or []
+                if not items:
+                    continue
+                newest_id = items[0].get("id_str") or items[0].get("id")
+                if newest_id:
+                    self.state.set_last_seen(c.uid, str(newest_id))
+            except Exception as e:
+                self.logger.warning(f"启动对齐 last_seen 失败: {c.name} ({c.uid}): {e}")
+
+        self.state.save()
+
     @staticmethod
     def load_creators_from_file(path: str = CREATORS_PATH) -> List[Creator]:
         """从文件加载创作者列表"""
         os.makedirs(os.path.dirname(path), exist_ok=True)
 
-        default = [
-            {"uid": 11473291, "name": "笨笨的芝菜", "check_interval": 300},
-            {"uid": 550494308, "name": "卢本圆复盘", "check_interval": 300},
-        ]
-
+        # 安全：不再自动生成默认博主列表，避免把个人订阅信息写入工作区。
+        # 请手动从 data/bilibili_creators.json.example 复制并修改为 data/bilibili_creators.json。
         if not os.path.exists(path):
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(default, f, ensure_ascii=False, indent=2)
+            return []
 
         try:
             with open(path, "r", encoding="utf-8") as f:
@@ -728,13 +762,4 @@ class MonitorService:
                 creators.append(creator)
             return creators
         except Exception:
-            return [
-                Creator(
-                    uid=i["uid"],
-                    name=i["name"],
-                    check_interval=i.get("check_interval", 300),
-                    enable_comments=False,
-                    comment_rules=[],
-                )
-                for i in default
-            ]
+            return []

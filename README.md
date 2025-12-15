@@ -83,7 +83,8 @@ uv sync
    # 详见: data/README.md
    ```
 
-   **注意**：`bilibili_state.json` 文件会在首次运行时自动创建，无需手动配置
+   **注意**：为避免重复推送，程序会在 `data/bilibili_state.json` 中维护每个 UP 的 `last_seen`（运行时状态文件，已在 `.gitignore` 忽略）。
+   默认不会在重启时补发停机期间的动态（避免刷屏）；如需补发近期动态，可使用 `uv run python main.py --reset`。
 
 6. 配置 B 站 Cookie（可选，用于动态监控）：
 

@@ -30,9 +30,15 @@ if env_file.exists():
 FEISHU_CONFIG = {
     "app_id": os.getenv("app_id"),
     "app_secret": os.getenv("app_secret"),
-    "template_id": os.getenv("FEISHU_TEMPLATE_ID", "YOUR_TEMPLATE_ID"),  # 替换为您的卡片模板ID
-    "template_version_name": os.getenv("FEISHU_TEMPLATE_VERSION", "1.0.0"),  # 替换为您的卡片版本号
-    "user_open_id": os.getenv("FEISHU_USER_OPEN_ID", "YOUR_USER_OPEN_ID"),  # 替换为接收消息的用户open_id
+    "template_id": os.getenv(
+        "FEISHU_TEMPLATE_ID", "YOUR_TEMPLATE_ID"
+    ),  # 替换为您的卡片模板ID
+    "template_version_name": os.getenv(
+        "FEISHU_TEMPLATE_VERSION", "1.0.0"
+    ),  # 替换为您的卡片版本号
+    "user_open_id": os.getenv(
+        "FEISHU_USER_OPEN_ID", "YOUR_USER_OPEN_ID"
+    ),  # 替换为接收消息的用户open_id
 }
 
 # B站配置
@@ -40,9 +46,12 @@ BILIBILI_CONFIG = {
     "SESSDATA": os.getenv("SESSDATA"),
     "bili_jct": os.getenv("bili_jct"),
     "buvid3": os.getenv("buvid3"),
-    "DedeUserID": os.getenv("DedeUserID"),
+    "buvid4": os.getenv("buvid4"),
+    # 兼容两种写法
+    "DedeUserID": os.getenv("DedeUserID") or os.getenv("dedeuserid"),
     "DedeUserID__ckMd5": os.getenv("DedeUserID__ckMd5"),
-    "refresh_token": os.getenv("refresh_token"),  # 添加refresh_token支持
+    "ac_time_value": os.getenv("ac_time_value"),
+    "refresh_token": os.getenv("refresh_token"),
 }
 
 # API配置
@@ -72,12 +81,43 @@ ANTI_BAN_CONFIG = {
 
 
 def build_bilibili_cookie() -> Optional[str]:
-    """构建B站请求所需的Cookie字符串"""
+    """构建B站请求所需的Cookie字符串（仅Cookie字段）"""
+    cookie_keys = (
+        "SESSDATA",
+        "bili_jct",
+        "buvid3",
+        "buvid4",
+        "DedeUserID",
+        "DedeUserID__ckMd5",
+    )
     parts = []
-    for key, value in BILIBILI_CONFIG.items():
+    for key in cookie_keys:
+        value = BILIBILI_CONFIG.get(key)
         if value:
             parts.append(f"{key}={value}")
     return "; ".join(parts) if parts else None
+
+
+def build_bilibili_credential():
+    """创建 bilibili-api-python 的 Credential 对象（若缺关键字段则返回 None）"""
+
+    try:
+        from bilibili_api import Credential
+    except Exception:
+        return None
+
+    cfg = BILIBILI_CONFIG
+    if not cfg.get("SESSDATA"):
+        return None
+
+    return Credential(
+        sessdata=cfg.get("SESSDATA"),
+        bili_jct=cfg.get("bili_jct"),
+        buvid3=cfg.get("buvid3"),
+        buvid4=cfg.get("buvid4"),
+        dedeuserid=cfg.get("DedeUserID"),
+        ac_time_value=cfg.get("ac_time_value"),
+    )
 
 
 def get_config_status() -> dict:

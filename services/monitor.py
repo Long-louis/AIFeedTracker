@@ -15,9 +15,10 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-import aiohttp
+from bilibili_api import user
 
-from .bilibili_auth import BilibiliAuth
+from config import build_bilibili_credential
+
 from .comment_fetcher import CommentFetcher
 
 
@@ -74,8 +75,6 @@ class JsonState:
 class MonitorService:
     """B站动态监控服务"""
 
-    # API配置
-    BILI_SPACE_API = "https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/space"
     DYNAMIC_PC_URL = "https://t.bilibili.com/{dynamic_id}"
     VIDEO_PC_URL = "https://www.bilibili.com/video/{bvid}"
 
@@ -89,7 +88,7 @@ class MonitorService:
         Args:
             feishu_bot: 飞书机器人实例
             summarizer: AI总结服务实例
-            cookie: B站Cookie
+            cookie: 兼容旧参数（已不再使用，凭证改由 bilibili-api-python 管理）
         """
         self.feishu_bot = feishu_bot
         self.summarizer = summarizer
@@ -97,8 +96,8 @@ class MonitorService:
         self.state = JsonState(self.STATE_PATH)
         self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
 
-        # 初始化B站认证管理
-        self.bili_auth = BilibiliAuth()
+        # 创建统一凭证（依赖 config.py 中的环境变量）
+        self.credential = build_bilibili_credential()
 
         # 初始化评论获取服务
         self.comment_fetcher = None
@@ -107,25 +106,10 @@ class MonitorService:
     def _init_comment_fetcher(self) -> None:
         """初始化评论获取服务"""
         try:
-            from bilibili_api import Credential
-
-            from config import BILIBILI_CONFIG
-
-            # 创建凭证（bilibili-api-python会自动处理WBI签名！）
-            credential = None
-            if BILIBILI_CONFIG.get("SESSDATA"):
-                credential = Credential(
-                    sessdata=BILIBILI_CONFIG.get("SESSDATA"),
-                    bili_jct=BILIBILI_CONFIG.get("bili_jct"),
-                    buvid3=BILIBILI_CONFIG.get("buvid3"),
-                )
-                self.logger.info("B站凭证创建成功（WBI签名将自动处理）")
-            else:
+            if not self.credential:
                 self.logger.warning("未配置SESSDATA，评论获取功能可能受限")
-
-            self.comment_fetcher = CommentFetcher(credential=credential)
+            self.comment_fetcher = CommentFetcher(credential=self.credential)
             self.logger.info("评论获取服务初始化成功")
-
         except Exception as e:
             self.logger.warning(f"评论获取服务初始化失败: {e}")
             self.comment_fetcher = None
@@ -296,79 +280,45 @@ class MonitorService:
         return None
 
     async def fetch_user_space_dynamics(
-        self, session: aiohttp.ClientSession, uid: int, limit_recent: int = 20
+        self, uid: int, limit_recent: int = 20
     ) -> Dict[str, Any]:
         """
-        获取用户空间动态
-
-        Args:
-            session: HTTP会话
-            uid: 用户ID
-            limit_recent: 限制获取最近的动态数量
-
-        Returns:
-            Dict: API响应数据
+        使用 bilibili-api-python 获取用户动态（替代手写 HTTP 调用）
         """
-        params = {
-            "offset": "",
-            "host_mid": str(uid),
-            "timezone_offset": "-480",
-            "platform": "web",
-            "features": "itemOpusStyle,listOnlyfans,opusBigCover",
-            "web_location": "333.1387",
-        }
 
-        # 导入统一配置的User-Agent
-        from config import USER_AGENT
+        if not self.credential:
+            return {"code": -1, "message": "未配置SESSDATA，无法拉取动态"}
 
-        headers = {
-            "User-Agent": USER_AGENT,  # 使用配置的UA，与浏览器保持一致
-            "Referer": f"https://space.bilibili.com/{uid}/dynamic",
-            "Accept": "application/json, text/plain, */*",
-            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-            "Accept-Encoding": "gzip, deflate, br",
-            "Origin": "https://space.bilibili.com",
-            "Connection": "keep-alive",
-            "Sec-Fetch-Dest": "empty",
-            "Sec-Fetch-Mode": "cors",
-            "Sec-Fetch-Site": "same-site",
-            "sec-ch-ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
-            "sec-ch-ua-mobile": "?0",
-            "sec-ch-ua-platform": '"Windows"',
-        }
+        try:
+            u = user.User(uid=uid, credential=self.credential)
 
-        if self.cookie:
-            headers["Cookie"] = self.cookie
-        else:
-            # 即使没有完整Cookie，也添加一些基础标识
-            headers["Cookie"] = "buvid3=generated; b_nut=1234567890"
+            # get_dynamics_new 返回 {items: [...], has_more: 1/0, offset: ""}
+            page = await u.get_dynamics_new(offset="")
 
-        async with session.get(
-            self.BILI_SPACE_API, params=params, headers=headers, timeout=20
-        ) as resp:
-            resp.raise_for_status()
-            data = await resp.json()
+            items = page.get("items", []) or []
+            if len(items) > limit_recent:
+                items = items[:limit_recent]
 
-            # 限制返回的动态数量
-            if "data" in data and "items" in data["data"]:
-                items = data["data"]["items"]
-                if len(items) > limit_recent:
-                    data["data"]["items"] = items[:limit_recent]
+            return {
+                "code": 0,
+                "data": {"items": items},
+                "has_more": page.get("has_more"),
+                "offset": page.get("offset"),
+            }
 
-            return data
+        except Exception as e:
+            self.logger.error(f"获取用户动态失败: {e}")
+            return {"code": -1, "message": str(e)}
 
-    async def process_creator(
-        self, session: aiohttp.ClientSession, creator: Creator
-    ) -> None:
+    async def process_creator(self, creator: Creator) -> None:
         """
         处理单个创作者的动态
 
         Args:
-            session: HTTP会话
             creator: 创作者信息
         """
         # 获取最近20个动态
-        data = await self.fetch_user_space_dynamics(session, creator.uid, 20)
+        data = await self.fetch_user_space_dynamics(creator.uid, 20)
 
         # 调试：打印API响应
         self.logger.debug(
@@ -663,16 +613,14 @@ class MonitorService:
                 creator.name, "哔哩哔哩", markdown_content
             )
 
-    async def monitor_single_creator(
-        self, session: aiohttp.ClientSession, creator: Creator
-    ) -> None:
+    async def monitor_single_creator(self, creator: Creator) -> None:
         """监控单个创作者的独立任务"""
         while True:
             try:
                 self.logger.info(
                     f"开始检查创作者 {creator.name} (UID: {creator.uid}) 的动态"
                 )
-                await self.process_creator(session, creator)
+                await self.process_creator(creator)
 
                 # 添加随机抖动
                 jitter = random.uniform(0.8, 1.2)
@@ -709,49 +657,47 @@ class MonitorService:
             creators: 创作者列表
             once: 是否只运行一次
         """
-        # 自动检查并刷新Cookie（如果需要且有refresh_token）
-        if self.cookie:
-            self.logger.info("检查Cookie是否需要刷新...")
-            refreshed_cookie = await self.bili_auth.auto_refresh_if_needed(self.cookie)
-            if refreshed_cookie != self.cookie:
-                self.logger.info("Cookie已自动刷新")
-                self.cookie = refreshed_cookie
-                # TODO: 更新到config或.env文件
-            else:
-                self.logger.info("Cookie无需刷新")
+        # 若凭证支持自动刷新，则调用库内检查/刷新
+        if self.credential:
+            try:
+                need_refresh = await self.credential.check_refresh()
+                if need_refresh:
+                    self.logger.info("检测到凭证需要刷新，开始刷新...")
+                    await self.credential.refresh()
+                    self.logger.info("凭证刷新完成")
+            except Exception as e:
+                self.logger.warning(f"凭证刷新检查失败: {e}")
 
-        timeout = aiohttp.ClientTimeout(total=30)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            if once:
-                # 一次性检查模式
-                for c in creators:
-                    await self.process_creator(session, c)
-            else:
-                # 持续监控模式
-                self.logger.info(f"启动持续监控模式，共 {len(creators)} 个创作者")
+        if once:
+            # 一次性检查模式
+            for c in creators:
+                await self.process_creator(c)
+        else:
+            # 持续监控模式
+            self.logger.info(f"启动持续监控模式，共 {len(creators)} 个创作者")
 
-                tasks = []
-                for i, creator in enumerate(creators):
-                    initial_delay = i * 30  # 每个创作者间隔30秒启动
+            tasks = []
+            for i, creator in enumerate(creators):
+                initial_delay = i * 30  # 每个创作者间隔30秒启动
 
-                    async def delayed_monitor(creator, delay):
-                        if delay > 0:
-                            self.logger.info(
-                                f"创作者 {creator.name}: 将在 {delay} 秒后开始监控"
-                            )
-                            await asyncio.sleep(delay)
-                        await self.monitor_single_creator(session, creator)
+                async def delayed_monitor(creator, delay):
+                    if delay > 0:
+                        self.logger.info(
+                            f"创作者 {creator.name}: 将在 {delay} 秒后开始监控"
+                        )
+                        await asyncio.sleep(delay)
+                    await self.monitor_single_creator(creator)
 
-                    task = asyncio.create_task(delayed_monitor(creator, initial_delay))
-                    tasks.append(task)
+                task = asyncio.create_task(delayed_monitor(creator, initial_delay))
+                tasks.append(task)
 
-                try:
-                    await asyncio.gather(*tasks)
-                except KeyboardInterrupt:
-                    self.logger.info("收到停止信号，正在关闭监控...")
-                    for task in tasks:
-                        task.cancel()
-                    await asyncio.gather(*tasks, return_exceptions=True)
+            try:
+                await asyncio.gather(*tasks)
+            except KeyboardInterrupt:
+                self.logger.info("收到停止信号，正在关闭监控...")
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
 
     @staticmethod
     def load_creators_from_file(path: str = CREATORS_PATH) -> List[Creator]:

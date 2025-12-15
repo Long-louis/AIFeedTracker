@@ -16,10 +16,11 @@
 
 ## 为什么需要配置
 
-B 站动态监控功能需要访问 B 站 API，需要以下信息：
+B 站动态监控功能需要访问 B 站 API，需要以下信息（全部供 `bilibili-api-python` 的 `Credential` 使用）：
 
-- **Cookie**: 用于身份认证，证明你已登录
-- **refresh_token**: 用于自动刷新 Cookie，避免频繁手动更新
+- **Cookie 字段**: `SESSDATA`、`bili_jct`、`buvid3`（有则再填 `buvid4`）以及账号 UID `DedeUserID`
+- **LocalStorage 字段**: `ac_time_value`（用于凭证刷新）
+- **refresh_token**（可选）: 若想自动刷新 Cookie
 - **User-Agent**: 浏览器标识，与 Cookie 匹配可降低风控风险
 
 ## 方式一：手动获取 Cookie
@@ -33,9 +34,8 @@ B 站动态监控功能需要访问 B 站 API，需要以下信息：
 5. 找到以下 Cookie 字段并复制值：
    - `SESSDATA`
    - `bili_jct`
-   - `buvid3`
+   - `buvid3`（有则同时复制 `buvid4`）
    - `DedeUserID`
-   - `DedeUserID__ckMd5`
 
 ### 步骤 2：保存到.env 文件
 
@@ -46,8 +46,11 @@ B 站动态监控功能需要访问 B 站 API，需要以下信息：
 SESSDATA=你的SESSDATA值
 bili_jct=你的bili_jct值
 buvid3=你的buvid3值
+# 可选
+# buvid4=你的buvid4值
 DedeUserID=你的DedeUserID值
-DedeUserID__ckMd5=你的DedeUserID__ckMd5值
+# 可选，兼容旧字段
+# DedeUserID__ckMd5=你的DedeUserID__ckMd5值
 ```
 
 ### 注意事项
@@ -58,33 +61,27 @@ DedeUserID__ckMd5=你的DedeUserID__ckMd5值
 
 ---
 
-## 方式二：手动获取 refresh_token
+## 方式二：获取 ac_time_value（和可选 refresh_token）
 
-有了 refresh_token，系统可以自动刷新 Cookie，无需手动更新。
+`bilibili-api-python` 的 `Credential.refresh()` 需要 `ac_time_value`；如果还提供 `refresh_token`，可进一步提升自动刷新成功率。
 
 ### 什么是 refresh_token
 
 refresh_token 是一个长效令牌，当 Cookie 过期时，可以用它向 B 站申请新的 Cookie。
 
-### 获取方法
-
-**在 B 站页面 Console 获取**
+### 获取 ac_time_value
 
 1. 在已登录的 B 站页面按 `F12`
 2. 切换到 `Console` 标签
 3. 输入并回车：
    ```javascript
-   localStorage.getItem("ac_time_value");
+   window.localStorage.ac_time_value
    ```
-4. 复制输出的值（不包括引号）
+4. 复制输出值（不包括引号）
 
-**如果返回 null**
+如果得到 `null`，请重新登录后立即再试，或在 Application → Local Storage 里查找。
 
-1. 退出 B 站重新登录
-2. 登录后立即执行上述命令
-3. 或者从 Application → Local Storage 中查找
-
-### 保存 refresh_token
+### 保存 refresh_token（可选）
 
 运行配置工具：
 
@@ -103,9 +100,12 @@ SESSDATA=你的SESSDATA值
 bili_jct=你的bili_jct值
 buvid3=你的buvid3值
 DedeUserID=你的DedeUserID值
-DedeUserID__ckMd5=你的DedeUserID__ckMd5值
+# 可选
+# buvid4=你的buvid4值
+# DedeUserID__ckMd5=你的DedeUserID__ckMd5值
 
 # 自动刷新配置
+ac_time_value=你的ac_time_value值
 refresh_token=你的refresh_token值
 ```
 
@@ -141,4 +141,6 @@ USER_AGENT=你的User-Agent字符串
 ```
 
 
-具体b站api参考文档：[bilibili-API-collect](https://socialsisteryi.github.io/bilibili-API-collect/docs/index.html)
+具体 b 站 API 参考文档：
+- bilibili-api-python: https://nemo2011.github.io/bilibili-api/#/
+- bilibili-API-collect（协议说明）: https://socialsisteryi.github.io/bilibili-API-collect/docs/index.html

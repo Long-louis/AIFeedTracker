@@ -1,62 +1,58 @@
 # -*- coding: utf-8 -*-
-"""
-飞书机器人服务模块
+"""Feishu webhook sender (registry-driven).
 
-提供飞书消息发送和卡片推送功能
+Design goals:
+- Webhook-only (no app mode) for maximum simplicity.
+- All routing is done by a local channel registry file (data/feishu_channels.json).
+- Business code only passes channel names like "webhook:default".
 """
 
-import asyncio
+from __future__ import annotations
+
+import base64
+import hashlib
+import hmac
 import json
 import logging
 import os
-import re
-from typing import Optional
+import time
+from datetime import datetime
+from typing import Any, Dict, Optional
 
 import aiohttp
 
-# 导入配置
+from config import FEISHU_TEMPLATE_ID, FEISHU_TEMPLATE_VERSION
 
-from config import FEISHU_CONFIG
+from .feishu_channels import FeishuChannelRegistry, WebhookConfig
 
 
-try:
-    import lark_oapi as lark
-    from lark_oapi.api.im.v1 import (
-        CreateImageRequest,
-        CreateImageRequestBody,
-        CreateImageResponse,
-        CreateMessageRequest,
-        CreateMessageRequestBody,
-        CreateMessageResponse,
-    )
+def _try_import_lark_oapi():
+    try:
+        import lark_oapi as lark  # type: ignore
+        from lark_oapi.api.im.v1 import (
+            CreateImageRequest,
+            CreateImageRequestBody,
+            CreateMessageRequest,
+            CreateMessageRequestBody,
+        )
 
-    LARK_SDK_AVAILABLE = True
-except ImportError:
-    LARK_SDK_AVAILABLE = False
-    lark = None
-    CreateMessageRequest = None
-    CreateMessageRequestBody = None
-    CreateMessageResponse = None
-    CreateImageRequest = None
-    CreateImageRequestBody = None
-    CreateImageResponse = None
+        return {
+            "lark": lark,
+            "CreateImageRequest": CreateImageRequest,
+            "CreateImageRequestBody": CreateImageRequestBody,
+            "CreateMessageRequest": CreateMessageRequest,
+            "CreateMessageRequestBody": CreateMessageRequestBody,
+        }
+    except Exception:
+        return None
 
 
 class FeishuBot:
-    """
-    飞书机器人客户端
-
-    支持两种模式：
-    1. Webhook模式：通过FEISHU_WEBHOOK环境变量设置的webhook URL发送消息
-    2. 应用模式：通过app_id和app_secret使用飞书开放平台API发送卡片消息
-    """
-
-    # 通知级别常量
+    # 通知级别常量（保持现有调用方语义）
     LEVEL_INFO = "INFO"
     LEVEL_WARNING = "WARNING"
     LEVEL_ERROR = "ERROR"
 
-    # 级别对应的emoji
     LEVEL_EMOJI = {
         "INFO": "✅",
         "WARNING": "⚠️",
@@ -65,50 +61,119 @@ class FeishuBot:
 
     def __init__(self):
         self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
+        self.template_id = FEISHU_TEMPLATE_ID
+        self.template_version_name = FEISHU_TEMPLATE_VERSION
+        self.registry = FeishuChannelRegistry.load()
 
-        # 飞书应用配置
-        self.app_id = FEISHU_CONFIG["app_id"]
-        self.app_secret = FEISHU_CONFIG["app_secret"]
-        self.template_id = FEISHU_CONFIG["template_id"]
-        self.template_version_name = FEISHU_CONFIG["template_version_name"]
-        self.user_open_id = FEISHU_CONFIG["user_open_id"]
+        if not self.template_id or self.template_id == "YOUR_TEMPLATE_ID":
+            self.logger.warning("未配置 FEISHU_TEMPLATE_ID：模板卡片将无法发送")
 
-        # 检查配置状态
-        self.has_app_config = bool(
-            self.app_id and self.app_secret and LARK_SDK_AVAILABLE
-        )
+    @staticmethod
+    def _gen_webhook_sign(timestamp: int, secret: str) -> str:
+        """Feishu webhook v2 sign: base64(hmac_sha256(msg=ts+'\n'+secret, key=secret))."""
 
-        if not self.has_app_config:
-            self.logger.warning(
-                "飞书应用配置不完整或lark-oapi未安装，消息将仅在日志中显示"
-            )
-        else:
-            self.logger.info("飞书应用模式已配置")
+        msg = f"{timestamp}\n{secret}".encode("utf-8")
+        key = secret.encode("utf-8")
+        digest = hmac.new(key, msg, digestmod=hashlib.sha256).digest()
+        return base64.b64encode(digest).decode("utf-8")
 
-    async def upload_image_to_feishu(self, image_url: str) -> Optional[str]:
-        """
-        上传图片到飞书并获取image key
+    def _build_template_card(
+        self, *, influencer: str, platform: str, markdown_content: str
+    ) -> Dict[str, Any]:
+        if not self.template_id or self.template_id == "YOUR_TEMPLATE_ID":
+            raise ValueError("未配置 FEISHU_TEMPLATE_ID")
 
-        Args:
-            image_url: 图片URL
+        return {
+            "type": "template",
+            "data": {
+                "template_id": self.template_id,
+                "template_version_name": self.template_version_name,
+                "template_variable": {
+                    "Influencer": influencer,
+                    "platform": platform,
+                    "markdown_content": markdown_content,
+                },
+            },
+        }
 
-        Returns:
-            str: 飞书image key，失败返回None
-        """
-        if not self.has_app_config:
+    async def _post_webhook(
+        self, webhook: WebhookConfig, payload: Dict[str, Any]
+    ) -> bool:
+        send_payload = dict(payload)
+
+        if webhook.secret:
+            ts = int(time.time())
+            send_payload["timestamp"] = str(ts)
+            send_payload["sign"] = self._gen_webhook_sign(ts, webhook.secret)
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    webhook.url,
+                    json=send_payload,
+                    headers={"Content-Type": "application/json; charset=utf-8"},
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as resp:
+                    data = await resp.json(content_type=None)
+
+            code = data.get("code")
+            if resp.status == 200 and code == 0:
+                return True
+
+            self.logger.error(f"Webhook 发送失败: http={resp.status}, resp={data}")
+            return False
+        except Exception as e:
+            self.logger.error(f"Webhook 发送异常: {e}")
+            return False
+
+    def _get_webhook_for(
+        self, kind: str, override_channel: Optional[str]
+    ) -> WebhookConfig:
+        channel = self.registry.pick_channel(kind, override_channel)
+        # Resolve and ensure it's a webhook channel
+        if channel.startswith("webhook:"):
+            webhook = self.registry.resolve_webhook(channel)
+            if not webhook:
+                raise ValueError(f"通道未定义或不可用: {channel}")
+            return webhook
+        raise ValueError(f"通道类型不为 webhook: {channel}")
+
+    def _get_channel(self, kind: str, override_channel: Optional[str]):
+        """返回 (type, channel, config) 三元组，type in {'webhook','app'}"""
+        channel = self.registry.pick_channel(kind, override_channel)
+        if channel.startswith("webhook:"):
+            wh = self.registry.resolve_webhook(channel)
+            if not wh:
+                raise ValueError(f"webhook 通道未定义: {channel}")
+            return "webhook", channel, wh
+        if channel.startswith("app:"):
+            app = self.registry.resolve_app(channel)
+            if not app:
+                raise ValueError(f"app 通道未定义: {channel}")
+            return "app", channel, app
+        raise ValueError(f"不支持的通道: {channel}")
+
+    async def upload_image_to_feishu(
+        self, image_url: str, app_cfg: Dict[str, str]
+    ) -> Optional[str]:
+        """上传图片到飞书（依赖飞书应用接口）。返回 image_key 或 None。"""
+        if not app_cfg:
+            return None
+
+        sdk = _try_import_lark_oapi()
+        if not sdk:
             return None
 
         try:
-            # 创建飞书客户端
             client = (
-                lark.Client.builder()
-                .app_id(self.app_id)
-                .app_secret(self.app_secret)
-                .log_level(lark.LogLevel.ERROR)
+                sdk["lark"]
+                .Client.builder()
+                .app_id(app_cfg["app_id"])
+                .app_secret(app_cfg["app_secret"])
+                .log_level(sdk["lark"].LogLevel.ERROR)
                 .build()
             )
 
-            # 下载图片
             async with aiohttp.ClientSession() as session:
                 async with session.get(image_url) as response:
                     if response.status != 200:
@@ -116,10 +181,8 @@ class FeishuBot:
                             f"下载图片失败: {image_url}, status: {response.status}"
                         )
                         return None
-
                     image_data = await response.read()
 
-            # 创建临时文件来存储图片
             import tempfile
 
             with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as temp_file:
@@ -127,12 +190,13 @@ class FeishuBot:
                 temp_file_path = temp_file.name
 
             try:
-                # 上传图片到飞书
                 with open(temp_file_path, "rb") as image_file:
                     request = (
-                        CreateImageRequest.builder()
+                        sdk["CreateImageRequest"]
+                        .builder()
                         .request_body(
-                            CreateImageRequestBody.builder()
+                            sdk["CreateImageRequestBody"]
+                            .builder()
                             .image_type("message")
                             .image(image_file)
                             .build()
@@ -150,45 +214,35 @@ class FeishuBot:
                         self.logger.error(f"图片上传失败: {response.msg}")
                         return None
             finally:
-                # 清理临时文件
-                os.unlink(temp_file_path)
+                try:
+                    os.unlink(temp_file_path)
+                except Exception:
+                    pass
 
         except Exception as e:
             self.logger.error(f"上传图片到飞书异常: {e}")
             return None
 
-    async def convert_images_in_markdown(self, markdown_content: str) -> str:
-        """
-        将Markdown中的图片URL转换为飞书image key
-
-        Args:
-            markdown_content: 包含图片链接的Markdown内容
-
-        Returns:
-            str: 转换后的Markdown内容
-        """
-        if not self.has_app_config:
+    async def convert_images_in_markdown(
+        self, markdown_content: str, app_cfg: Dict[str, str]
+    ) -> str:
+        """将Markdown中的图片URL转换为飞书image key（仅在 app 模式使用）。"""
+        if not app_cfg:
             return markdown_content
 
-        # 查找所有图片链接
         image_pattern = r"!\[([^\]]*)\]\(([^)]+)\)"
-        matches = re.findall(image_pattern, markdown_content)
+        import re
 
+        matches = re.findall(image_pattern, markdown_content)
         if not matches:
             return markdown_content
 
-        self.logger.info(f"发现 {len(matches)} 个图片链接，开始转换...")
-
         converted_content = markdown_content
         for alt_text, image_url in matches:
-            # 跳过已经是image key的情况
             if image_url.startswith("img_"):
                 continue
-
-            # 上传图片并获取image key
-            image_key = await self.upload_image_to_feishu(image_url)
+            image_key = await self.upload_image_to_feishu(image_url, app_cfg)
             if image_key:
-                # 替换原始链接为image key
                 old_pattern = f"![{alt_text}]({image_url})"
                 new_pattern = f"![{alt_text}]({image_key})"
                 converted_content = converted_content.replace(old_pattern, new_pattern)
@@ -198,42 +252,36 @@ class FeishuBot:
 
         return converted_content
 
-    async def send_card_message(
-        self, influencer: str, platform: str, markdown_content: str
+    async def _send_via_app_template_card(
+        self,
+        app_cfg: Dict[str, str],
+        influencer: str,
+        platform: str,
+        markdown_content: str,
     ) -> bool:
-        """
-        发送卡片消息到飞书
+        """使用飞书应用机器人发送模板卡片（懒加载 lark-oapi）。"""
+        sdk = _try_import_lark_oapi()
+        if not sdk:
+            self.logger.error("lark-oapi 不可用: 无法使用 app 通道发送卡片消息")
+            return False
 
-        Args:
-            influencer: 博主名称
-            platform: 平台名称
-            markdown_content: Markdown格式的内容
-
-        Returns:
-            bool: 发送成功返回True
-        """
-        if not self.has_app_config:
-            # 回退到日志模式
-            self.logger.info(
-                f"[Mock飞书消息] [{platform}] {influencer}\n{markdown_content}"
-            )
-            return True
+        if not app_cfg.get("user_open_id"):
+            self.logger.error("app 通道未配置 user_open_id，无法发送消息")
+            return False
 
         try:
-            # 转换图片链接为飞书image key
-            self.logger.info("开始处理Markdown中的图片链接...")
-            converted_content = await self.convert_images_in_markdown(markdown_content)
+            self.logger.info("开始处理Markdown中的图片链接（app模式）...")
+            converted = await self.convert_images_in_markdown(markdown_content, app_cfg)
 
-            # 创建飞书客户端
             client = (
-                lark.Client.builder()
-                .app_id(self.app_id)
-                .app_secret(self.app_secret)
-                .log_level(lark.LogLevel.ERROR)
+                sdk["lark"]
+                .Client.builder()
+                .app_id(app_cfg["app_id"])
+                .app_secret(app_cfg["app_secret"])
+                .log_level(sdk["lark"].LogLevel.ERROR)
                 .build()
             )
 
-            # 构建卡片消息内容
             card_content = {
                 "data": {
                     "template_id": self.template_id,
@@ -241,19 +289,20 @@ class FeishuBot:
                     "template_variable": {
                         "Influencer": influencer,
                         "platform": platform,
-                        "markdown_content": converted_content,
+                        "markdown_content": converted,
                     },
                 },
                 "type": "template",
             }
 
-            # 构造请求
             request = (
-                CreateMessageRequest.builder()
+                sdk["CreateMessageRequest"]
+                .builder()
                 .receive_id_type("open_id")
                 .request_body(
-                    CreateMessageRequestBody.builder()
-                    .receive_id(self.user_open_id)
+                    sdk["CreateMessageRequestBody"]
+                    .builder()
+                    .receive_id(app_cfg.get("user_open_id"))
                     .msg_type("interactive")
                     .content(json.dumps(card_content, ensure_ascii=False))
                     .build()
@@ -261,72 +310,136 @@ class FeishuBot:
                 .build()
             )
 
-            # 发送请求
             response = client.im.v1.message.create(request)
-
             if response.success():
-                self.logger.info(f"飞书卡片消息发送成功: {influencer} - {platform}")
+                self.logger.info(f"飞书应用卡片发送成功: {influencer} - {platform}")
                 return True
-            else:
-                self.logger.error(f"飞书卡片消息发送失败: {response.msg}")
-                return False
-
+            self.logger.error(f"飞书应用卡片发送失败: {response.msg}")
+            return False
         except Exception as e:
-            self.logger.error(f"发送飞书卡片消息异常: {e}")
-            # 回退到日志模式
-            self.logger.info(
-                f"[Mock飞书消息] [{platform}] {influencer}\n{markdown_content}"
+            self.logger.error(f"通过 app 发送卡片失败: {e}")
+            return False
+
+    async def send_card_message(
+        self,
+        influencer: str,
+        platform: str,
+        markdown_content: str,
+        channel: Optional[str] = None,
+    ) -> bool:
+        """发送内容卡片。
+
+        - 默认走 defaults.content
+        - creator 可传入 channel 覆盖（例如 webhook:vip）
+        """
+
+        try:
+            ch_type, ch_name, cfg = self._get_channel("content", channel)
+            card = self._build_template_card(
+                influencer=influencer,
+                platform=platform,
+                markdown_content=markdown_content,
             )
+            payload: Dict[str, Any] = {"msg_type": "interactive", "card": card}
+
+            if ch_type == "webhook":
+                return await self._post_webhook(cfg, payload)
+
+            # app channel
+            if ch_type == "app":
+                ok = await self._send_via_app_template_card(
+                    cfg, influencer, platform, markdown_content
+                )
+                return bool(ok)
+
+            raise ValueError(f"未知通道类型: {ch_type}")
+        except Exception as e:
+            self.logger.error(f"发送飞书卡片失败: {e}")
+            return False
+
+    async def send_text(self, text: str, channel: Optional[str] = None) -> bool:
+        """发送纯文本消息（用于调试/测试）。"""
+
+        try:
+            ch_type, ch_name, cfg = self._get_channel("content", channel)
+
+            if ch_type == "webhook":
+                payload: Dict[str, Any] = {
+                    "msg_type": "text",
+                    "content": {"text": text},
+                }
+                return await self._post_webhook(cfg, payload)
+
+            # app: send as text via app message API
+            if ch_type == "app":
+                sdk = _try_import_lark_oapi()
+                if not sdk:
+                    self.logger.error("lark-oapi 不可用: 无法使用 app 通道发送文本消息")
+                    return False
+                try:
+                    client = (
+                        sdk["lark"]
+                        .Client.builder()
+                        .app_id(cfg["app_id"])
+                        .app_secret(cfg["app_secret"])
+                        .log_level(sdk["lark"].LogLevel.ERROR)
+                        .build()
+                    )
+
+                    request = (
+                        sdk["CreateMessageRequest"]
+                        .builder()
+                        .receive_id_type("open_id")
+                        .request_body(
+                            sdk["CreateMessageRequestBody"]
+                            .builder()
+                            .receive_id(cfg.get("user_open_id"))
+                            .msg_type("text")
+                            .content(text)
+                            .build()
+                        )
+                        .build()
+                    )
+
+                    response = client.im.v1.message.create(request)
+                    return response.success()
+                except Exception as e:
+                    self.logger.error(f"通过 app 发送文本失败: {e}")
+                    return False
+
+            raise ValueError(f"未知通道类型: {ch_type}")
+        except Exception as e:
+            self.logger.error(f"发送飞书文本失败: {e}")
             return False
 
     async def send_system_notification(
         self, level: str, title: str, content: str
     ) -> bool:
-        """
-        发送系统状态通知
+        """发送告警通知（走 defaults.alert）。"""
 
-        Args:
-            level: 通知级别 (INFO/WARNING/ERROR)
-            title: 通知标题
-            content: 通知内容（支持Markdown）
+        emoji = self.LEVEL_EMOJI.get(level, "📢")
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        markdown = f"**{emoji} {level}**\n\n**{title}**\n\n{content}\n\n---\n时间: {ts}"
 
-        Returns:
-            bool: 发送成功返回True
-        """
         try:
-            # 获取级别对应的emoji
-            emoji = self.LEVEL_EMOJI.get(level, "📢")
-
-            # 格式化通知内容
-            from datetime import datetime
-
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-            formatted_content = f"**{emoji} {level}**\n\n"
-            formatted_content += f"**{title}**\n\n"
-            formatted_content += f"{content}\n\n"
-            formatted_content += f"---\n"
-            formatted_content += f"时间: {timestamp}"
-
-            # 使用现有的卡片消息发送
-            return await self.send_card_message(
-                "系统通知", "AI视频机器人", formatted_content
+            ch_type, ch_name, cfg = self._get_channel("alert", None)
+            card = self._build_template_card(
+                influencer="系统通知",
+                platform="AIFeedTracker",
+                markdown_content=markdown,
             )
+            payload: Dict[str, Any] = {"msg_type": "interactive", "card": card}
 
+            if ch_type == "webhook":
+                return await self._post_webhook(cfg, payload)
+
+            if ch_type == "app":
+                ok = await self._send_via_app_template_card(
+                    cfg, "系统通知", "AIFeedTracker", markdown
+                )
+                return bool(ok)
+
+            raise ValueError(f"未知通道类型: {ch_type}")
         except Exception as e:
-            self.logger.error(f"发送系统通知异常: {e}")
-            # 即使发送失败也在日志中记录
-            self.logger.info(f"[系统通知] [{level}] {title}: {content}")
+            self.logger.error(f"发送系统通知失败: {e}")
             return False
-
-
-async def _demo():
-    """演示函数"""
-    logging.basicConfig(level=logging.INFO)
-    bot = FeishuBot()
-    # 测试卡片消息
-    await bot.send_card_message("测试博主", "B站", "这是一个测试卡片消息")
-
-
-if __name__ == "__main__":
-    asyncio.run(_demo())

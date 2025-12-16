@@ -21,10 +21,10 @@ cp bilibili_creators.json.example bilibili_creators.json
   {
     "uid": 123456, // B站用户ID（必需，示例值请替换）
     "name": "博主名称", // 显示名称（必需）
-    "platform": "bilibili", // 平台（固定为bilibili）
+    "check_interval": 300, // 检查间隔（秒），默认300秒
     "enable_comments": false, // 是否启用评论监控（可选）
-    "comment_keywords": [], // 评论关键词过滤（可选）
-    "check_interval": 300 // 检查间隔（秒），默认300秒
+    "comment_rules": [], // 评论筛选规则列表（可选，支持多规则）
+    "feishu_channel": "webhook:default" // 可选：为该博主指定推送通道（例如 webhook:alerts）
   }
 ]
 ```
@@ -80,6 +80,18 @@ cp data/bilibili_creators.json.example data/bilibili_creators.json
 # 2. 编辑配置文件，添加您要监控的博主UID
 # 使用文本编辑器修改 bilibili_creators.json
 ```
+
+### Feishu 通道配置（可选但推荐）
+
+本项目通过 `data/feishu_channels.json` 集中管理飞书推送通道（多个命名 webhook 与可选 app）。
+
+复制示例并填写 webhook 信息：
+
+```bash
+cp data/feishu_channels.json.example data/feishu_channels.json
+```
+
+在 `webhooks` 中添加多个命名 webhook 并在 `defaults` 中设置 `content` / `alert` 的默认通道。可选地，在 `apps` 节点中添加应用机器人配置，并使用 `app:<name>` 作为通道来启用应用机器人（app 模式会在需要时懒加载 `lark-oapi`）。
 
 ### 自动生成文件（程序自动创建）
 

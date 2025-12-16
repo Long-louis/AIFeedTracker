@@ -24,7 +24,7 @@
 
 - 发送富文本卡片消息
 - 支持 Markdown 格式
-- 图片自动上传和转换
+- 支持多 webhook 通道配置（不同群/不同UP可用不同 webhook）
 
 ## 🚀 快速开始
 
@@ -47,21 +47,23 @@ uv sync
 ### 配置
 
 1. 复制 `env.example` 为 `.env`
-2. 配置飞书应用信息：
-
-   ```env
-   app_id=你的飞书应用ID
-   app_secret=你的飞书应用密钥
-   ```
-
-3. **配置飞书卡片模板（必需）**：
+2. **配置飞书卡片模板（必需）**：
 
    项目提供了现成的卡片模板文件 `docs/博主更新订阅.card`，只需导入即可：
 
    - 在飞书开放平台的「消息卡片」→「卡片搭建工具」中导入 `docs/博主更新订阅.card`
    - 发布后获取 `template_id` 和 `template_version_name`
-   - 更新 `config.py` 中的配置
+   - 在 `.env` 中填写 `FEISHU_TEMPLATE_ID` 与 `FEISHU_TEMPLATE_VERSION`
 
+   详细步骤请查看 [飞书卡片配置指南](./docs/FEISHU_CARD_SETUP.md)
+
+3. **配置飞书 Webhook 通道（必需）**：
+
+   ```bash
+   cp data/feishu_channels.json.example data/feishu_channels.json
+   ```
+
+   在 `data/feishu_channels.json` 里填写多个 webhook（url/secret）并设置默认路由。可选地，你也可以在 `apps` 节点中添加飞书应用机器人配置，并在 defaults 中使用 `app:<name>` 或在某个 UP 的 `feishu_channel` 中指定 `app:<name>`（应用模式会懒加载 `lark-oapi`，默认不启用）。
    详细步骤请查看 [飞书卡片配置指南](./docs/FEISHU_CARD_SETUP.md)
 
 4. **配置 AI 服务（必需）**：

@@ -1,12 +1,17 @@
-# 飞书卡片模板配置指南
+# 飞书卡片模板与 Webhook 配置指南
 
-本项目使用飞书卡片消息推送视频总结和动态通知。由于卡片模板是绑定到特定飞书应用的，您需要在自己的飞书应用中创建相同的卡片模板。
+本项目使用 **飞书群自定义机器人 Webhook（V2）** 推送模板卡片消息。
 
-## 前提条件
+核心原则：
+- **Webhook-only**（不使用飞书应用机器人），避免配置复杂和权限/用户 open_id 依赖
+- **通道注册表**（channels registry）集中管理多个 webhook 和默认路由
 
-1. 已创建飞书企业自建应用
-2. 已获取 `app_id` 和 `app_secret`
-3. 应用已开启消息相关权限
+你只需要：
+1) 在飞书卡片搭建工具里创建/导入模板卡片，拿到 `template_id` 和 `template_version_name`
+2) 在飞书群里创建自定义机器人，拿到 webhook url（以及可选的 secret）
+3) 填写 `data/feishu_channels.json` 并在 `.env` 里配置模板信息
+
+> 可选：如果你想使用飞书应用机器人（例如发送到指定 open_id 的用户），可以在 `data/feishu_channels.json` 中添加 `apps` 节点并在 `defaults` 中使用 `app:<name>` 或在某个 UP 的 `feishu_channel` 中使用 `app:<name>`。应用模式会在需要时懒加载 `lark-oapi`，并仅在配置完整时启用。
 
 ## 快速创建卡片模板
 
@@ -72,16 +77,37 @@
 ### 更新 .env 文件
 
 ```env
-# 飞书应用配置
-app_id=cli_xxxxxxxxxxxxx
-app_secret=xxxxxxxxxxxxxxxxxxxxx
-
 # 飞书消息配置
 FEISHU_TEMPLATE_ID=您的消息模板ID
 FEISHU_TEMPLATE_VERSION=您的消息模板版本
-FEISHU_USER_OPEN_ID=您的用户open_id
+
+# （可选）通道注册表文件路径，默认 data/feishu_channels.json
+# FEISHU_CHANNELS_CONFIG=data/feishu_channels.json
 ```
 
-### 获取用户 open_id
+### 配置通道注册表（多 webhook）
 
-请查看[飞书文档](https://open.feishu.cn/document/server-docs/contact-v3/user/batch_get_id?appId=cli_a8675b0dfcc3500d)
+1. 复制示例文件：
+
+```bash
+cp data/feishu_channels.json.example data/feishu_channels.json
+```
+
+2. 编辑 `data/feishu_channels.json`：
+
+- 在 `webhooks` 中添加多个命名 webhook（例如 `default`、`alerts`）
+- 在 `defaults` 中设置默认路由：
+   - `defaults.content`：内容推送走哪个 webhook
+   - `defaults.alert`：告警推送走哪个 webhook
+
+3. （可选）为不同 UP 指定不同 webhook：
+
+在 `data/bilibili_creators.json` 的每个对象里增加：
+
+```json
+{
+   "uid": 123456,
+   "name": "某UP",
+   "feishu_channel": "webhook:default"
+}
+```

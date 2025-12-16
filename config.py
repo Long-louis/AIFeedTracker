@@ -24,22 +24,18 @@ env_file = project_root / ".env"
 if env_file.exists():
     load_dotenv(env_file)
 
-# 飞书配置
-# 注意：以下配置需要根据您自己的飞书应用进行修改
-# 详见文档: docs/FEISHU_CARD_SETUP.md
-FEISHU_CONFIG = {
-    "app_id": os.getenv("app_id"),
-    "app_secret": os.getenv("app_secret"),
-    "template_id": os.getenv(
-        "FEISHU_TEMPLATE_ID", "YOUR_TEMPLATE_ID"
-    ),  # 替换为您的卡片模板ID
-    "template_version_name": os.getenv(
-        "FEISHU_TEMPLATE_VERSION", "1.0.0"
-    ),  # 替换为您的卡片版本号
-    "user_open_id": os.getenv(
-        "FEISHU_USER_OPEN_ID", "YOUR_USER_OPEN_ID"
-    ),  # 替换为接收消息的用户open_id
-}
+# ============================================
+# Feishu 配置（Webhook-only，使用 channels registry）
+# ============================================
+
+# 模板卡片配置
+FEISHU_TEMPLATE_ID = os.getenv("FEISHU_TEMPLATE_ID", "YOUR_TEMPLATE_ID")
+FEISHU_TEMPLATE_VERSION = os.getenv("FEISHU_TEMPLATE_VERSION", "1.0.0")
+
+# 通道注册表配置文件路径（默认 data/feishu_channels.json）
+FEISHU_CHANNELS_CONFIG = os.getenv(
+    "FEISHU_CHANNELS_CONFIG", str(project_root / "data" / "feishu_channels.json")
+)
 
 # B站配置
 BILIBILI_CONFIG = {
@@ -122,10 +118,13 @@ def build_bilibili_credential():
 
 def get_config_status() -> dict:
     """获取配置状态，用于诊断"""
+    feishu_channels_exists = Path(FEISHU_CHANNELS_CONFIG).exists()
     return {
         "env_file_exists": env_file.exists(),
         "feishu_configured": bool(
-            FEISHU_CONFIG["app_id"] and FEISHU_CONFIG["app_secret"]
+            feishu_channels_exists
+            and FEISHU_TEMPLATE_ID
+            and FEISHU_TEMPLATE_ID != "YOUR_TEMPLATE_ID"
         ),
         "bilibili_configured": bool(BILIBILI_CONFIG["SESSDATA"]),
         "cookie_available": bool(build_bilibili_cookie()),

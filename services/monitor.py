@@ -31,6 +31,7 @@ class Creator:
     check_interval: int = 300  # 默认5分钟
     enable_comments: bool = False  # 是否启用评论获取
     comment_rules: List[Dict[str, Any]] = None  # 评论筛选规则列表（支持多规则）
+    feishu_channel: Optional[str] = None  # 可选：指定此创作者消息推送通道（例如 webhook:group1）
 
     def __post_init__(self):
         """初始化默认值"""
@@ -335,7 +336,7 @@ class MonitorService:
             if data.get("code") != 0:
                 error_msg = f"API返回错误: code={data.get('code')}, message={data.get('message')}"
                 self.logger.warning(f"{creator.name} ({creator.uid}) - {error_msg}")
-                # 发送API错误通知
+                # 发送API错误通知：由 FeishuBot 的 alert 通道配置决定是否推送/推送到哪里
                 if self.feishu_bot:
                     try:
                         await self.feishu_bot.send_system_notification(
@@ -534,7 +535,10 @@ class MonitorService:
         # 发送到飞书
         if self.feishu_bot:
             await self.feishu_bot.send_card_message(
-                creator.name, "哔哩哔哩", markdown_content
+                creator.name,
+                "哔哩哔哩",
+                markdown_content,
+                channel=creator.feishu_channel,
             )
 
     async def _fetch_video_comments(
@@ -644,7 +648,7 @@ class MonitorService:
 
             except Exception as e:
                 self.logger.error(f"监控创作者 {creator.name} 时出错: {e}")
-                # 发送监控异常通知
+                # 发送监控异常通知：由 FeishuBot 的 alert 通道配置决定是否推送/推送到哪里
                 if self.feishu_bot:
                     try:
                         await self.feishu_bot.send_system_notification(
@@ -752,12 +756,17 @@ class MonitorService:
                 items = json.load(f)
             creators = []
             for i in items:
+                # 如果配置中显式禁用（enabled=false），则跳过该条目以便保留但不生效
+                if i.get("enabled", True) is False:
+                    continue
+                channel = i.get("feishu_channel") or i.get("channel")
                 creator = Creator(
                     uid=int(i["uid"]),
                     name=str(i["name"]),
                     check_interval=int(i.get("check_interval", 300)),
                     enable_comments=bool(i.get("enable_comments", False)),
                     comment_rules=i.get("comment_rules", []),
+                    feishu_channel=str(channel).strip() if channel else None,
                 )
                 creators.append(creator)
             return creators

@@ -1,31 +1,46 @@
-# 使用 Python 3.11 作为基础镜像（与下方 bullseye 源保持一致）
+# syntax=docker/dockerfile:1
+# 构建阶段：安装依赖
+FROM python:3.11-slim-bullseye AS builder
+
+WORKDIR /app
+
+# 替换 Debian 系统源为清华源（适配 bullseye 版本）
+RUN echo "deb https://mirrors.tuna.tsinghua.edu.cn/debian/ bullseye main contrib non-free" > /etc/apt/sources.list && \
+    echo "deb https://mirrors.tuna.tsinghua.edu.cn/debian/ bullseye-updates main contrib non-free" >> /etc/apt/sources.list && \
+    echo "deb https://mirrors.tuna.tsinghua.edu.cn/debian-security bullseye-security main contrib non-free" >> /etc/apt/sources.list
+
+# 安装编译工具（加速源码包构建）
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    build-essential \
+    gcc \
+    python3-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+# 安装 uv
+RUN pip install --no-cache-dir uv -i https://mirrors.aliyun.com/pypi/simple/
+
+# 复制依赖文件
+COPY pyproject.toml uv.lock ./
+
+# 配置 uv 并使用缓存挂载安装依赖
+ENV UV_HTTP_TIMEOUT=300
+ENV UV_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev
+
+# 运行阶段：精简镜像
 FROM python:3.11-slim-bullseye
 
-# 设置工作目录
 WORKDIR /app
 
 # 设置环境变量
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app
+ENV PATH="/app/.venv/bin:$PATH"
 
-# 替换 Debian 系统源为清华源（适配 bullseye 版本）
-RUN echo "deb https://mirrors.tuna.tsinghua.edu.cn/debian/ bullseye main contrib non-free" > /etc/apt/sources.list && \
-    echo "deb https://mirrors.tuna.tsinghua.edu.cn/debian/ bullseye-updates main contrib non-free" >> /etc/apt/sources.list && \
-    echo "deb https://mirrors.tuna.tsinghua.edu.cn/debian-security bullseye-security main contrib non-free" >> /etc/apt/sources.list && \
-    apt-get update && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
-
-# 安装 uv (Python 包管理器)
-RUN pip install uv -i https://mirrors.aliyun.com/pypi/simple/
-
-# 复制依赖文件
-COPY pyproject.toml uv.lock ./
-
-# 配置 uv 使用国内 PyPI 镜像源并安装项目依赖
-ENV UV_HTTP_TIMEOUT=300
-ENV UV_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
-RUN uv sync --frozen
+# 从构建阶段复制虚拟环境
+COPY --from=builder /app/.venv /app/.venv
 
 # 复制项目代码
 COPY . .
@@ -37,4 +52,4 @@ RUN mkdir -p data log
 RUN chmod +x /app/main.py
 
 # 设置默认命令
-CMD ["uv", "run", "python", "main.py", "--mode", "service"]
+CMD ["python", "main.py", "--mode", "service"]

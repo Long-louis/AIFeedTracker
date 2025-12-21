@@ -9,28 +9,24 @@ source = { virtual = "." }
 dependencies = [
     { name = "aiofiles" },
     { name = "aiohttp" },
-    { name = "aiologger" },
     { name = "bilibili-api-python" },
     { name = "brotli" },
     { name = "lark-oapi" },
     { name = "openai" },
     { name = "playwright" },
     { name = "python-dotenv" },
-    { name = "qrcode" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "aiofiles", specifier = ">=24.1.0" },
     { name = "aiohttp", specifier = ">=3.12.15" },
-    { name = "aiologger", specifier = ">=0.7.0" },
     { name = "bilibili-api-python", specifier = ">=17.4.0" },
     { name = "brotli", specifier = ">=1.1.0" },
     { name = "lark-oapi", specifier = ">=1.4.23" },
     { name = "openai", specifier = ">=2.3.0" },
     { name = "playwright", specifier = ">=1.55.0" },
     { name = "python-dotenv", specifier = ">=1.1.1" },
-    { name = "qrcode", specifier = ">=8.2" },
 ]
 
 [[package]]
@@ -136,12 +132,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/b4/2e/ffeb7f6256b33635c29dbed29a22a723ff2dd7401fff42ea60cf2060abfb/aiohttp-3.12.15-cp313-cp313-win32.whl", hash = "sha256:f813c3e9032331024de2eb2e32a88d86afb69291fbc37a3a3ae81cc9917fb3d0", size = 422647, upload-time = "2025-07-29T05:51:50.718Z" },
     { url = "https://files.pythonhosted.org/packages/1b/8e/78ee35774201f38d5e1ba079c9958f7629b1fd079459aea9467441dbfbf5/aiohttp-3.12.15-cp313-cp313-win_amd64.whl", hash = "sha256:1a649001580bdb37c6fdb1bebbd7e3bc688e8ec2b5c6f52edbb664662b17dc84", size = 449067, upload-time = "2025-07-29T05:51:52.549Z" },
 ]
-
-[[package]]
-name = "aiologger"
-version = "0.7.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/76/a8/ca4c00b319b877d29aa792cdd4ae3fb2a9f57268d94708a637abe9ae58c5/aiologger-0.7.0.tar.gz", hash = "sha256:7a4d5c91b836b61e842a791071786a3d80d6b6fa46fb8fd8e73391253ecb72ac", size = 20485, upload-time = "2022-10-05T01:03:22.199Z" }
 
 [[package]]
 name = "aiosignal"

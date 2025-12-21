@@ -16,6 +16,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from bilibili_api import user
+from bilibili_api.comment import CommentResourceType
 
 from config import build_bilibili_credential
 
@@ -31,7 +32,9 @@ class Creator:
     check_interval: int = 300  # 默认5分钟
     enable_comments: bool = False  # 是否启用评论获取
     comment_rules: List[Dict[str, Any]] = None  # 评论筛选规则列表（支持多规则）
-    feishu_channel: Optional[str] = None  # 可选：指定此创作者消息推送通道（例如 webhook:group1）
+    feishu_channel: Optional[str] = (
+        None  # 可选：指定此创作者消息推送通道（例如 webhook:group1）
+    )
 
     def __post_init__(self):
         """初始化默认值"""
@@ -71,6 +74,31 @@ class JsonState:
         entry = self.state.setdefault(str(uid), {})
         entry["last_seen"] = str(dynamic_id)
 
+    def get_pinned_comment_fingerprint(
+        self, uid: int, dynamic_id: str
+    ) -> Optional[str]:
+        entry = self.state.get(str(uid), {})
+        pinned = entry.get("pinned_comments", {})
+        if not isinstance(pinned, dict):
+            return None
+        return pinned.get(str(dynamic_id))
+
+    def set_pinned_comment_fingerprint(
+        self, uid: int, dynamic_id: str, fingerprint: str
+    ) -> None:
+        entry = self.state.setdefault(str(uid), {})
+        pinned = entry.setdefault("pinned_comments", {})
+        if not isinstance(pinned, dict):
+            entry["pinned_comments"] = {}
+            pinned = entry["pinned_comments"]
+        pinned[str(dynamic_id)] = str(fingerprint)
+
+        # 控制体积：最多保留 50 条最近记录（按插入顺序淘汰最早的）
+        if len(pinned) > 50:
+            extra = len(pinned) - 50
+            for k in list(pinned.keys())[:extra]:
+                pinned.pop(k, None)
+
 
 class MonitorService:
     """B站动态监控服务"""
@@ -81,6 +109,13 @@ class MonitorService:
     # 运行时状态文件：只用于去重/断点续跑，已在 .gitignore 忽略
     STATE_PATH = os.path.join("data", "bilibili_state.json")
     CREATORS_PATH = os.path.join("data", "bilibili_creators.json")
+
+    # 动态基础信息里的 comment_type -> bilibili-api-python CommentResourceType
+    _COMMENT_TYPE_TO_RESOURCE: Dict[int, CommentResourceType] = {
+        1: CommentResourceType.VIDEO,
+        11: CommentResourceType.DYNAMIC_DRAW,
+        17: CommentResourceType.DYNAMIC,
+    }
 
     def __init__(self, feishu_bot=None, summarizer=None, cookie: Optional[str] = None):
         """
@@ -270,6 +305,206 @@ class MonitorService:
             return ""
 
     @staticmethod
+    def _collect_badge_texts(obj: Any) -> List[str]:
+        texts: List[str] = []
+        if isinstance(obj, dict):
+            badge = obj.get("badge")
+            if isinstance(badge, dict):
+                t = badge.get("text")
+                if isinstance(t, str) and t:
+                    texts.append(t)
+
+            for v in obj.values():
+                texts.extend(MonitorService._collect_badge_texts(v))
+
+        elif isinstance(obj, list):
+            for v in obj:
+                texts.extend(MonitorService._collect_badge_texts(v))
+
+        return texts
+
+    @staticmethod
+    def is_charge_dynamic(item: Dict[str, Any]) -> bool:
+        """判断是否为“充电/充电专属/onlyfans”动态。
+
+        依据 deepwiki 对 bilibili-api-python 的说明：优先检查动态结构中的 badge 文本与 onlyfans 字段。
+        """
+
+        modules = item.get("modules", {})
+        if not isinstance(modules, dict):
+            return False
+
+        dynamic = modules.get("module_dynamic", {})
+        if not isinstance(dynamic, dict):
+            return False
+
+        # 1) additional.type 里包含 onlyfans/charge/upower 等
+        additional = dynamic.get("additional")
+        if isinstance(additional, dict):
+            t = additional.get("type")
+            if isinstance(t, str):
+                tl = t.lower()
+                if "onlyfans" in tl or "charge" in tl or "upower" in tl:
+                    return True
+            # 部分结构可能直接给 onlyfans 字段
+            if "onlyfans" in additional:
+                return True
+
+        major = dynamic.get("major")
+        if isinstance(major, dict):
+            mt = major.get("type")
+            if isinstance(mt, str):
+                mtl = mt.lower()
+                if "onlyfans" in mtl or "charge" in mtl or "upower" in mtl:
+                    return True
+
+        # 2) 扫描 major/opus/archive 等的 badge.text 是否含“充电”
+        badge_texts = MonitorService._collect_badge_texts(dynamic)
+        return any(("充电" in t) for t in badge_texts)
+
+    def _get_comment_thread_info(
+        self, item: Dict[str, Any]
+    ) -> Optional[Tuple[int, CommentResourceType]]:
+        basic = item.get("basic", {})
+        if not isinstance(basic, dict):
+            return None
+
+        oid_str = basic.get("comment_id_str") or basic.get("rid_str")
+        if not oid_str or not isinstance(oid_str, str) or not oid_str.isdigit():
+            return None
+
+        ct = basic.get("comment_type")
+        if isinstance(ct, str):
+            if not ct.isdigit():
+                return None
+            ct_int = int(ct)
+        elif isinstance(ct, int):
+            ct_int = ct
+        else:
+            return None
+
+        resource = self._COMMENT_TYPE_TO_RESOURCE.get(ct_int)
+        if resource is None:
+            return None
+
+        return int(oid_str), resource
+
+    def _pinned_comment_fingerprint(self, pinned: Optional[Dict[str, Any]]) -> str:
+        if not pinned or not isinstance(pinned, dict):
+            return ""
+        rpid = pinned.get("rpid")
+        if rpid is None:
+            rpid = pinned.get("rpid_str")
+        if rpid is None:
+            return ""
+        return str(rpid)
+
+    async def _check_recent_pinned_comments(
+        self, creator: Creator, items: List[Dict[str, Any]]
+    ) -> None:
+        """检查近期动态是否出现新的置顶评论。"""
+
+        if not self.comment_fetcher:
+            return
+
+        current_time = time.time()
+        earliest_allowed_timestamp = current_time - 48 * 3600
+
+        candidates: List[Dict[str, Any]] = []
+        for it in items:
+            ts = self.get_publish_timestamp(it)
+            if ts and ts >= earliest_allowed_timestamp:
+                candidates.append(it)
+                if len(candidates) >= 5:
+                    break
+
+        if not candidates:
+            return
+
+        changed = False
+
+        for it in candidates:
+            dynamic_id = str(it.get("id_str") or it.get("id"))
+            if not dynamic_id:
+                continue
+
+            thread = self._get_comment_thread_info(it)
+            if thread is None:
+                continue
+
+            oid, resource = thread
+            pinned = await self.comment_fetcher.fetch_upper_pinned_comment(
+                oid=oid, type_=resource
+            )
+            fp = self._pinned_comment_fingerprint(pinned)
+            prev = self.state.get_pinned_comment_fingerprint(creator.uid, dynamic_id)
+
+            # 首次见到该动态：只初始化，不推送（避免重启刷屏）
+            if prev is None:
+                self.state.set_pinned_comment_fingerprint(creator.uid, dynamic_id, fp)
+                changed = True
+                continue
+
+            # 出现新的置顶评论：prev 为空，fp 非空；或 rpid 发生变化
+            if fp and fp != prev:
+                await self._push_pinned_comment_update(
+                    creator=creator,
+                    item=it,
+                    pinned_comment=pinned,
+                )
+                self.state.set_pinned_comment_fingerprint(creator.uid, dynamic_id, fp)
+                changed = True
+                continue
+
+            # 置顶被取消/清空：只更新状态，不推送
+            if (not fp) and fp != prev:
+                self.state.set_pinned_comment_fingerprint(creator.uid, dynamic_id, fp)
+                changed = True
+
+        if changed:
+            self.state.save()
+
+    async def _push_pinned_comment_update(
+        self, creator: Creator, item: Dict[str, Any], pinned_comment: Dict[str, Any]
+    ) -> None:
+        if not self.feishu_bot:
+            return
+
+        did = str(item.get("id_str") or item.get("id"))
+        url = self.DYNAMIC_PC_URL.format(dynamic_id=did)
+
+        title = "（无文本内容）"
+        vinfo = self.extract_video_info(item)
+        if vinfo:
+            _, video_title = vinfo
+            if video_title:
+                title = video_title
+        else:
+            text = self.parse_text_from_item(item)
+            if text:
+                title = text.split("\n", 1)[0].strip() or title
+
+        pinned_md = self.comment_fetcher.format_comment_for_display(pinned_comment)
+
+        charge_tag = ""
+        if self.is_charge_dynamic(item):
+            charge_tag = "【充电】"
+
+        markdown_content = (
+            f"**{charge_tag}发现新的置顶评论**\n\n"
+            f"**动态：** {title}\n\n"
+            f"---\n\n{pinned_md}\n\n---\n\n"
+            f"[查看原动态]({url})"
+        )
+
+        await self.feishu_bot.send_card_message(
+            creator.name,
+            "哔哩哔哩",
+            markdown_content,
+            channel=creator.feishu_channel,
+        )
+
+    @staticmethod
     def extract_video_info(item: Dict[str, Any]) -> Optional[Tuple[str, str]]:
         """从动态项提取视频信息"""
         dynamic = item.get("modules", {}).get("module_dynamic", {})
@@ -356,6 +591,9 @@ class MonitorService:
 
         # 按发布时间戳排序
         items.sort(key=self.get_publish_timestamp, reverse=True)
+
+        # 每轮都检查近期动态的置顶评论变化（与是否有新动态无关）
+        await self._check_recent_pinned_comments(creator, items)
 
         last_seen = self.state.get_last_seen(creator.uid)
         if last_seen is None:
@@ -497,10 +735,12 @@ class MonitorService:
 
         pub_time = self.get_publish_time(item)
 
+        charge_prefix = ""
+        if self.is_charge_dynamic(item):
+            charge_prefix = "**【充电】**\n\n"
+
         # 构建markdown内容
-        markdown_content = (
-            f"**{title}**\n\n[原视频链接]({video_url})\n[动态链接]({dynamic_url})"
-        )
+        markdown_content = f"{charge_prefix}**{title}**\n\n[原视频链接]({video_url})\n[动态链接]({dynamic_url})"
 
         # 🆕 评论获取功能
         comment_content = await self._fetch_video_comments(bvid, title, creator)
@@ -611,19 +851,26 @@ class MonitorService:
         if not text:
             text = "(无文本内容)"
 
+        charge_prefix = ""
+        if self.is_charge_dynamic(item):
+            charge_prefix = "**【充电】**\n\n"
+
         pub_time = self.get_publish_time(item)
 
         # 构建markdown内容
-        markdown_content = text
+        markdown_content = f"{charge_prefix}{text}"
         if pub_time:
-            markdown_content = f"{text}\n\n{pub_time}"
+            markdown_content = f"{charge_prefix}{text}\n\n{pub_time}"
 
         markdown_content += f"\n\n[查看原动态]({url})"
 
         # 发送到飞书
         if self.feishu_bot:
             await self.feishu_bot.send_card_message(
-                creator.name, "哔哩哔哩", markdown_content
+                creator.name,
+                "哔哩哔哩",
+                markdown_content,
+                channel=creator.feishu_channel,
             )
 
     async def monitor_single_creator(self, creator: Creator) -> None:

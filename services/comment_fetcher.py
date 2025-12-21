@@ -460,6 +460,47 @@ class CommentFetcher:
             self.logger.error(f"格式化评论失败: {e}")
             return "评论格式化失败"
 
+    async def fetch_upper_pinned_comment(
+        self, oid: int, type_: CommentResourceType
+    ) -> Optional[Dict[str, Any]]:
+        """获取 UP 主置顶评论（如存在）。
+
+        兼容 bilibili-api-python 评论接口的两种常见返回结构：
+        - data.top.upper
+        - upper.top
+        """
+
+        comment_data = await comment.get_comments(
+            oid=oid,
+            type_=type_,
+            page_index=1,
+            order=OrderType.TIME,
+            credential=self.credential,
+        )
+
+        payload: Any = comment_data
+        if isinstance(comment_data, dict) and isinstance(
+            comment_data.get("data"), dict
+        ):
+            payload = comment_data["data"]
+
+        if not isinstance(payload, dict):
+            return None
+
+        top = payload.get("top")
+        if isinstance(top, dict):
+            upper = top.get("upper")
+            if isinstance(upper, dict):
+                return upper
+
+        upper_wrap = payload.get("upper")
+        if isinstance(upper_wrap, dict):
+            top2 = upper_wrap.get("top")
+            if isinstance(top2, dict):
+                return top2
+
+        return None
+
     def format_comments_for_feishu(
         self, comments: List[Dict[str, Any]], video_title: str, bvid: str
     ) -> str:
@@ -480,7 +521,7 @@ class CommentFetcher:
         # 构建Markdown内容
         md_content = f"## 📺 视频：{video_title}\n\n"
         md_content += f"🔗 https://www.bilibili.com/video/{bvid}\n\n"
-        md_content += f"---\n\n"
+        md_content += "---\n\n"
         md_content += f"### 🔥 精选评论 (共{len(comments)}条)\n\n"
 
         for idx, comm in enumerate(comments, 1):

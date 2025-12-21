@@ -15,16 +15,7 @@ else
     echo "⚠️  警告：本地未找到 .env 文件"
 fi
 
-# 2. 同步配置文件到服务器
-echo "📤 同步配置文件..."
-if [ -f data/bilibili_creators.json ]; then
-    scp data/bilibili_creators.json "$SERVER:$DEPLOY_PATH/data/"
-fi
-if [ -f data/feishu_channels.json ]; then
-    scp data/feishu_channels.json "$SERVER:$DEPLOY_PATH/data/"
-fi
-
-# 3. 同步代码到服务器
+# 2. 同步代码到服务器（配置文件已通过 Git 同步）
 echo "📦 拉取最新代码..."
 ssh "$SERVER" << EOF
 set -euo pipefail

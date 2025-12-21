@@ -45,12 +45,15 @@ log/
 *.log
 
 # Data files (contain runtime state and credentials)
-data/
-*.json
+# 忽略运行时状态文件
+data/bilibili_state.json
+data/*.bak
+data/*.tmp
 # 但允许示例文件和业务配置文件（私有仓库安全）
 !data/*.example
 !data/feishu_channels.json
 !data/bilibili_creators.json
+!data/README.md
 
 # IDE files
 .vscode/

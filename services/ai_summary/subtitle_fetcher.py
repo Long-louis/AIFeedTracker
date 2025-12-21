@@ -5,13 +5,12 @@
 从B站视频获取AI生成的字幕文本
 """
 
-import json
 import logging
 import re
 from typing import Optional
 
 import aiohttp
-from bilibili_api import video, Credential
+from bilibili_api import Credential, video
 
 from config import BILIBILI_CONFIG
 
@@ -19,9 +18,56 @@ from config import BILIBILI_CONFIG
 class SubtitleFetcher:
     """B站字幕获取服务"""
 
+    @staticmethod
+    def format_timestamp(seconds: float) -> str:
+        """将秒数格式化为 mm:ss 或 hh:mm:ss"""
+        if seconds < 0:
+            raise ValueError("seconds必须>=0")
+
+        total_seconds = int(seconds)
+        hours = total_seconds // 3600
+        minutes = (total_seconds % 3600) // 60
+        secs = total_seconds % 60
+
+        if hours > 0:
+            return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+        return f"{minutes:02d}:{secs:02d}"
+
+    @classmethod
+    def subtitle_body_to_text(cls, body: list) -> str:
+        """将字幕 body 列表转换为带时间戳的纯文本（逐行）。
+
+        输出格式：
+        [mm:ss] 字幕内容
+        """
+        if not isinstance(body, list):
+            raise ValueError("字幕body不是列表格式")
+
+        lines = []
+        for item in body:
+            if not isinstance(item, dict):
+                continue
+
+            content = item.get("content")
+            if not isinstance(content, str):
+                continue
+
+            content = content.strip()
+            if not content:
+                continue
+
+            start = item.get("from")
+            if isinstance(start, (int, float)):
+                ts = cls.format_timestamp(float(start))
+                lines.append(f"[{ts}] {content}")
+            else:
+                lines.append(content)
+
+        return "\n".join(lines)
+
     def __init__(self):
         self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
-        
+
         # 初始化B站凭证（如果配置了的话）
         self.credential = None
         sessdata = BILIBILI_CONFIG.get("SESSDATA")
@@ -59,7 +105,7 @@ class SubtitleFetcher:
             video_url: B站视频URL
 
         Returns:
-            字幕文本内容（纯文本，已去除时间轴），失败返回None
+            字幕文本内容（纯文本，包含时间戳行前缀），失败返回None
         """
         try:
             # 1. 解析BV号
@@ -76,7 +122,7 @@ class SubtitleFetcher:
             if not video_info or "cid" not in video_info:
                 self.logger.error(f"无法获取视频 {bvid} 的cid")
                 return None
-            
+
             cid = video_info["cid"]
             self.logger.info(f"获取到视频cid: {cid}")
 
@@ -121,7 +167,7 @@ class SubtitleFetcher:
             # 5. 获取字幕URL并下载
             subtitle_url = selected_subtitle.get("subtitle_url")
             if not subtitle_url:
-                self.logger.error(f"字幕URL为空")
+                self.logger.error("字幕URL为空")
                 return None
 
             # 如果URL是相对路径，补充完整
@@ -150,7 +196,7 @@ class SubtitleFetcher:
             subtitle_url: 字幕文件URL
 
         Returns:
-            合并后的纯文本字幕
+            合并后的纯文本字幕（包含时间戳行前缀）
         """
         try:
             async with aiohttp.ClientSession() as session:
@@ -173,17 +219,7 @@ class SubtitleFetcher:
                 self.logger.error("字幕body不是列表格式")
                 return None
 
-            # 提取所有字幕文本并合并
-            texts = []
-            for item in body:
-                if isinstance(item, dict) and "content" in item:
-                    content = item["content"].strip()
-                    if content:
-                        texts.append(content)
-
-            # 合并文本
-            full_text = " ".join(texts)
-            return full_text
+            return self.subtitle_body_to_text(body)
 
         except Exception as e:
             self.logger.error(f"下载字幕失败: {e}")

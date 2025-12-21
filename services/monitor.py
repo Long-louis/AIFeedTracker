@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 from bilibili_api import user
 from bilibili_api.comment import CommentResourceType
 
@@ -36,10 +38,22 @@ class Creator:
         None  # 可选：指定此创作者消息推送通道（例如 webhook:group1）
     )
 
+    # 可选：使用 cron 表达式（5段）定义运行时间；支持多个表达式
+    # 示例：
+    # - "*/2 10-11 * * *"  (10-11点每2分钟)
+    # - "*/2 15-16 * * *"  (15-16点每2分钟)
+    # - "0 11 * * *"       (每天11:00)
+    crons: Optional[List[str]] = None
+
+    # 可选：每次触发后增加随机延迟（秒），用于错峰与降低风控
+    jitter_seconds: int = 0
+
     def __post_init__(self):
         """初始化默认值"""
         if self.comment_rules is None:
             self.comment_rules = []
+        if self.crons is None:
+            self.crons = []
 
 
 class JsonState:
@@ -109,6 +123,8 @@ class MonitorService:
     # 运行时状态文件：只用于去重/断点续跑，已在 .gitignore 忽略
     STATE_PATH = os.path.join("data", "bilibili_state.json")
     CREATORS_PATH = os.path.join("data", "bilibili_creators.json")
+
+    _SCHEDULER_TIMEZONE = "Asia/Shanghai"
 
     # 动态基础信息里的 comment_type -> bilibili-api-python CommentResourceType
     _COMMENT_TYPE_TO_RESOURCE: Dict[int, CommentResourceType] = {
@@ -235,8 +251,37 @@ class MonitorService:
             if major and isinstance(major, dict):
                 major_type = major.get("type", "")
 
+                # 处理直播通知/直播推荐（常见：开播提醒）
+                if major_type in (
+                    "MAJOR_TYPE_LIVE_RCMD",
+                    "MAJOR_TYPE_LIVE",
+                    "live_rcmd",
+                    "LIVE_RCMD",
+                ) or (
+                    "live_rcmd" in major and isinstance(major.get("live_rcmd"), dict)
+                ):
+                    live = major.get("live_rcmd") or major.get("live")
+                    if live and isinstance(live, dict):
+                        title = live.get("title") or live.get("room_title")
+                        if title and isinstance(title, str):
+                            text_parts.append(f"**📺 开播通知：{title.strip()}**\n")
+                        else:
+                            text_parts.append("**📺 开播通知**\n")
+
+                        uname = live.get("uname") or live.get("user_name")
+                        if uname and isinstance(uname, str):
+                            text_parts.append(f"主播：{uname.strip()}\n")
+
+                        jump_url = live.get("jump_url") or live.get("link")
+                        if jump_url and isinstance(jump_url, str):
+                            text_parts.append(f"[进入直播间]({jump_url})")
+
+                        cover = live.get("cover") or live.get("cover_url")
+                        if cover and isinstance(cover, str):
+                            image_urls.append(cover)
+
                 # 处理OPUS类型动态（图文混排）
-                if major_type == "MAJOR_TYPE_OPUS":
+                elif major_type == "MAJOR_TYPE_OPUS":
                     opus = major.get("opus")
                     if opus and isinstance(opus, dict):
                         title = opus.get("title")
@@ -267,6 +312,87 @@ class MonitorService:
                                 src = item_data.get("src")
                                 if src:
                                     image_urls.append(src)
+
+                # 处理视频/投稿类动态（archive）
+                elif major_type in ("MAJOR_TYPE_ARCHIVE", "archive"):
+                    archive = major.get("archive", {})
+                    if archive and isinstance(archive, dict):
+                        title = archive.get("title")
+                        if title and isinstance(title, str):
+                            text_parts.append(f"**{title.strip()}**\n")
+                        jump_url = archive.get("jump_url") or archive.get("url")
+                        if jump_url and isinstance(jump_url, str):
+                            text_parts.append(f"[查看视频]({jump_url})")
+                        cover = archive.get("cover")
+                        if cover and isinstance(cover, str):
+                            image_urls.append(cover)
+
+                # 处理文章/专栏
+                elif major_type in ("MAJOR_TYPE_ARTICLE", "ARTICLE", "article") or (
+                    "article" in major and isinstance(major.get("article"), dict)
+                ):
+                    article = major.get("article")
+                    if article and isinstance(article, dict):
+                        title = article.get("title")
+                        if title and isinstance(title, str):
+                            text_parts.append(f"**📰 {title.strip()}**\n")
+                        desc = article.get("desc") or article.get("summary")
+                        if desc and isinstance(desc, str):
+                            text_parts.append(desc.strip())
+                        jump_url = article.get("jump_url") or article.get("url")
+                        if jump_url and isinstance(jump_url, str):
+                            text_parts.append(f"\n[查看文章]({jump_url})")
+                        cover = article.get("covers")
+                        if (
+                            isinstance(cover, list)
+                            and cover
+                            and isinstance(cover[0], str)
+                        ):
+                            image_urls.append(cover[0])
+
+                # 处理番剧/PGC
+                elif major_type in ("MAJOR_TYPE_PGC", "PGC", "pgc") or (
+                    "pgc" in major and isinstance(major.get("pgc"), dict)
+                ):
+                    pgc = major.get("pgc")
+                    if pgc and isinstance(pgc, dict):
+                        title = pgc.get("title")
+                        if title and isinstance(title, str):
+                            text_parts.append(f"**🎬 {title.strip()}**\n")
+                        desc = pgc.get("desc")
+                        if desc and isinstance(desc, str):
+                            text_parts.append(desc.strip())
+                        jump_url = pgc.get("jump_url") or pgc.get("url")
+                        if jump_url and isinstance(jump_url, str):
+                            text_parts.append(f"\n[查看详情]({jump_url})")
+                        cover = pgc.get("cover")
+                        if cover and isinstance(cover, str):
+                            image_urls.append(cover)
+
+                # 其他带卡片的动态类型：尽量从 major 子结构抽取 title/jump_url/cover
+                # 用于兜底覆盖：直播预约卡片、合集、音乐、商品等（结构通常包含 title/jump_url/cover）
+                if not text_parts:
+                    for key in (
+                        "live_rcmd",
+                        "live",
+                        "ugc_season",
+                        "common",
+                        "music",
+                        "goods",
+                        "reserve",
+                    ):
+                        card = major.get(key)
+                        if isinstance(card, dict):
+                            title = card.get("title")
+                            if isinstance(title, str) and title.strip():
+                                text_parts.append(f"**{title.strip()}**\n")
+                            jump_url = card.get("jump_url") or card.get("url")
+                            if isinstance(jump_url, str) and jump_url.strip():
+                                text_parts.append(f"[查看详情]({jump_url.strip()})")
+                            cover = card.get("cover")
+                            if isinstance(cover, str) and cover.strip():
+                                image_urls.append(cover.strip())
+                            break
 
             # 如果major中没有文本，尝试从desc中获取
             if not text_parts:
@@ -405,6 +531,10 @@ class MonitorService:
         """检查近期动态是否出现新的置顶评论。"""
 
         if not self.comment_fetcher:
+            return
+
+        # 方案 A：enable_comments 同时控制置顶评论监控与视频精选评论
+        if not creator.enable_comments:
             return
 
         current_time = time.time()
@@ -943,31 +1073,61 @@ class MonitorService:
             for c in creators:
                 await self.process_creator(c)
         else:
-            # 持续监控模式
-            self.logger.info(f"启动持续监控模式，共 {len(creators)} 个创作者")
+            # 持续监控模式：使用 APScheduler 统一调度（cron / interval）
+            self.logger.info(
+                f"启动持续监控模式（APScheduler），共 {len(creators)} 个创作者"
+            )
 
-            tasks = []
-            for i, creator in enumerate(creators):
-                initial_delay = i * 30  # 每个创作者间隔30秒启动
+            scheduler = AsyncIOScheduler(timezone=self._SCHEDULER_TIMEZONE)
 
-                async def delayed_monitor(creator, delay):
-                    if delay > 0:
-                        self.logger.info(
-                            f"创作者 {creator.name}: 将在 {delay} 秒后开始监控"
+            async def _run_creator_job(c: Creator) -> None:
+                await self.process_creator(c)
+
+            for creator in creators:
+                # 若配置了 cron，则优先使用 cron 调度；否则回退到 interval
+                if creator.crons:
+                    for idx, expr in enumerate(creator.crons):
+                        if not isinstance(expr, str) or not expr.strip():
+                            continue
+                        trigger = CronTrigger.from_crontab(
+                            expr.strip(), timezone=self._SCHEDULER_TIMEZONE
                         )
-                        await asyncio.sleep(delay)
-                    await self.monitor_single_creator(creator)
+                        scheduler.add_job(
+                            _run_creator_job,
+                            trigger=trigger,
+                            args=[creator],
+                            id=f"monitor:{creator.uid}:{idx}",
+                            max_instances=1,
+                            coalesce=True,
+                            jitter=int(creator.jitter_seconds or 0) or None,
+                            replace_existing=True,
+                        )
+                        self.logger.info(
+                            f"已为 {creator.name} 设置 cron: {expr.strip()} (jitter={creator.jitter_seconds}s)"
+                        )
+                else:
+                    scheduler.add_job(
+                        _run_creator_job,
+                        trigger="interval",
+                        seconds=max(30, int(creator.check_interval)),
+                        args=[creator],
+                        id=f"monitor:{creator.uid}:interval",
+                        max_instances=1,
+                        coalesce=True,
+                        jitter=int(creator.jitter_seconds or 0) or None,
+                        replace_existing=True,
+                    )
+                    self.logger.info(
+                        f"已为 {creator.name} 设置 interval: {creator.check_interval}s (jitter={creator.jitter_seconds}s)"
+                    )
 
-                task = asyncio.create_task(delayed_monitor(creator, initial_delay))
-                tasks.append(task)
+            scheduler.start()
 
             try:
-                await asyncio.gather(*tasks)
+                await asyncio.Event().wait()
             except KeyboardInterrupt:
-                self.logger.info("收到停止信号，正在关闭监控...")
-                for task in tasks:
-                    task.cancel()
-                await asyncio.gather(*tasks, return_exceptions=True)
+                self.logger.info("收到停止信号，正在关闭调度器...")
+                scheduler.shutdown(wait=False)
 
     async def _prime_last_seen(self, creators: List[Creator]) -> None:
         """启动时对齐每个 UP 的 last_seen 到当前最新，不发送任何通知。"""
@@ -1007,6 +1167,22 @@ class MonitorService:
                 if i.get("enabled", True) is False:
                     continue
                 channel = i.get("feishu_channel") or i.get("channel")
+
+                crons_val = i.get("crons")
+                if crons_val is None:
+                    crons_val = i.get("cron")
+                if isinstance(crons_val, str) and crons_val.strip():
+                    crons: List[str] = [crons_val.strip()]
+                elif isinstance(crons_val, list):
+                    crons = [str(x).strip() for x in crons_val if str(x).strip()]
+                else:
+                    crons = []
+
+                jitter = i.get("jitter_seconds")
+                if jitter is None:
+                    jitter = i.get("jitter")
+                jitter_seconds = int(jitter or 0)
+
                 creator = Creator(
                     uid=int(i["uid"]),
                     name=str(i["name"]),
@@ -1014,6 +1190,8 @@ class MonitorService:
                     enable_comments=bool(i.get("enable_comments", False)),
                     comment_rules=i.get("comment_rules", []),
                     feishu_channel=str(channel).strip() if channel else None,
+                    crons=crons,
+                    jitter_seconds=jitter_seconds,
                 )
                 creators.append(creator)
             return creators

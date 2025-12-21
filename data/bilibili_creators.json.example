@@ -3,6 +3,11 @@
     "uid": 123456,
     "name": "示例博主1（请替换为你订阅的UP）",
     "check_interval": 300,
+    "crons": [
+      "*/2 10-11 * * *",
+      "*/2 15-16 * * *"
+    ],
+    "jitter_seconds": 30,
     "enable_comments": false,
     "comment_rules": [],
     "feishu_channel": "webhook:default"
@@ -11,6 +16,7 @@
     "uid": 234567,
     "name": "示例博主2（请替换为你订阅的UP）",
     "check_interval": 600,
+    "jitter_seconds": 30,
     "enable_comments": false,
     "comment_rules": [],
     "feishu_channel": "webhook:default"

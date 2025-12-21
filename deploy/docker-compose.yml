@@ -13,8 +13,8 @@ services:
 
     # 配置与运行时状态放在服务器本地（不会进入镜像/不会进入仓库）
     volumes:
-      - ./data:/app/data
-      - ./log:/app/log
+      - ../data:/app/data
+      - ../log:/app/log
     # 可选：如果你需要固定时区（也可以直接写进 .env）
     # environment:
     #   TZ: Asia/Shanghai

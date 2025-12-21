@@ -23,17 +23,32 @@ cd "$DEPLOY_PATH"
 git pull origin main
 EOF
 
-# 3. 构建并重启服务
-echo "🔨 构建并重启服务..."
+# 3. 构建并重启服务（默认不构建）
+# 用法: ./scripts/deploy.sh [--rebuild|--build|-b]   （带 --rebuild 则强制重新构建镜像）
+if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+    echo "用法: $0 [--rebuild|--build|-b]"
+    exit 0
+fi
+
+REBUILD=false
+if [ "${1:-}" = "--rebuild" ] || [ "${1:-}" = "--build" ] || [ "${1:-}" = "-b" ]; then
+    REBUILD=true
+fi
+
+echo "🔨 重启服务 (rebuild=${REBUILD})..."
 ssh "$SERVER" << EOF
 set -euo pipefail
 cd "$DEPLOY_PATH/deploy"
-docker compose build --no-cache
-docker compose up -d --remove-orphans
+if [ "${REBUILD}" = "true" ]; then
+    echo "🔧 正在重新构建镜像..."
+    docker compose build --no-cache
+fi
+# 默认使用 --no-build 避免触发下载/编译，除非显式请求重建
+docker compose up -d --remove-orphans --no-build
 docker image prune -f
 echo "✅ 部署完成！"
 EOF
 
 echo ""
-echo "🎉 部署成功！查看日志："
+echo "🎉 操作完成！查看实时日志："
 echo "   ssh $SERVER 'cd $DEPLOY_PATH/deploy && docker compose logs -f'"

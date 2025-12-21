@@ -23,9 +23,13 @@ RUN pip install --no-cache-dir uv -i https://mirrors.aliyun.com/pypi/simple/
 # 复制依赖文件
 COPY pyproject.toml uv.lock ./
 
-# 配置 uv 并使用缓存挂载安装依赖
+# 配置 uv 使用国内镜像源
 ENV UV_HTTP_TIMEOUT=300
 ENV UV_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
+ENV UV_EXTRA_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple/
+ENV UV_INDEX_STRATEGY=first-index
+
+# 使用缓存挂载安装依赖
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev
 

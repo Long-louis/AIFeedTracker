@@ -23,29 +23,39 @@ cd "$DEPLOY_PATH"
 git pull origin main
 EOF
 
-# 3. 构建并重启服务（默认不构建）
-# 用法: ./scripts/deploy.sh [--rebuild|--build|-b]   （带 --rebuild 则强制重新构建镜像）
+# 3. 重启服务（默认不构建）
+# 用法: ./scripts/deploy.sh [--build|-b|--rebuild]   （--build 使用缓存构建；--rebuild 强制 no-cache）
 if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
-    echo "用法: $0 [--rebuild|--build|-b]"
+    echo "用法: $0 [--build|-b|--rebuild]"
     exit 0
 fi
 
-REBUILD=false
-if [ "${1:-}" = "--rebuild" ] || [ "${1:-}" = "--build" ] || [ "${1:-}" = "-b" ]; then
-    REBUILD=true
+BUILD_MODE="no-build"
+if [ "${1:-}" = "--build" ] || [ "${1:-}" = "-b" ]; then
+    BUILD_MODE="build"
+fi
+if [ "${1:-}" = "--rebuild" ]; then
+    BUILD_MODE="rebuild"
 fi
 
-echo "🔨 重启服务 (rebuild=${REBUILD})..."
+echo "🔨 重启服务 (mode=${BUILD_MODE})..."
 ssh "$SERVER" << EOF
 set -euo pipefail
 cd "$DEPLOY_PATH/deploy"
-if [ "${REBUILD}" = "true" ]; then
-    echo "🔧 正在重新构建镜像..."
+if [ "${BUILD_MODE}" = "rebuild" ]; then
+    echo "🔧 正在重新构建镜像 (no-cache)..."
     docker compose build --no-cache
 fi
-# 默认使用 --no-build 避免触发下载/编译，除非显式请求重建
-docker compose up -d --remove-orphans --no-build
-docker image prune -f
+if [ "${BUILD_MODE}" = "build" ]; then
+    echo "🔧 正在构建镜像 (with cache)..."
+    docker compose build
+fi
+# 默认使用 --no-build 避免触发下载/编译；若 build/rebuild 已执行，则直接 up
+if [ "${BUILD_MODE}" = "no-build" ]; then
+    docker compose up -d --remove-orphans --no-build
+else
+    docker compose up -d --remove-orphans
+fi
 echo "✅ 部署完成！"
 EOF
 

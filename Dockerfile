@@ -1,5 +1,5 @@
-# 使用 Python 3.11 作为基础镜像
-FROM python:3.11-slim
+# 使用 Python 3.11 作为基础镜像（与下方 bullseye 源保持一致）
+FROM python:3.11-slim-bullseye
 
 # 设置工作目录
 WORKDIR /app

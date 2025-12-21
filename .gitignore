@@ -23,8 +23,14 @@ browser_data/
 *.pem
 
 # Internal development files (keep locally, don't push)
-.github/
 .cursor/
+
+# Server-local deploy files
+deploy/.env
+deploy/docker-compose.override.yml
+
+# Scripts directory (keep deployment scripts)
+!scripts/
 
 # Test files (root level only, keep tests/ directory)
 /test_*.py
@@ -41,8 +47,10 @@ log/
 # Data files (contain runtime state and credentials)
 data/
 *.json
-# 但允许示例文件
+# 但允许示例文件和业务配置文件（私有仓库安全）
 !data/*.example
+!data/feishu_channels.json
+!data/bilibili_creators.json
 
 # IDE files
 .vscode/

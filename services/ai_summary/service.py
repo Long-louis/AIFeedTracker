@@ -6,7 +6,7 @@ AI总结服务主模块
 """
 
 import logging
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 from config import AI_CONFIG
 
@@ -91,27 +91,35 @@ class AISummaryService:
 
                 try:
                     # 1. 获取字幕
-                    self.logger.info(f"步骤1: 获取字幕...")
+                    self.logger.info("步骤1: 获取字幕...")
                     subtitle = await self.subtitle_fetcher.fetch_subtitle(video_url)
 
                     if not subtitle:
                         error_msg = f"获取字幕失败: {video_url}"
                         self.logger.error(error_msg)
                         failed_videos.append(video_url)
-                        summary_contents.append(f"❌ 获取字幕失败")
+                        detail = getattr(self.subtitle_fetcher, "last_error", None)
+                        if detail:
+                            summary_contents.append(f"❌ 获取字幕失败: {detail}")
+                        else:
+                            summary_contents.append("❌ 获取字幕失败")
                         continue
 
                     self.logger.info(f"字幕获取成功，长度: {len(subtitle)} 字符")
 
                     # 2. 生成总结
-                    self.logger.info(f"步骤2: 生成AI总结...")
+                    self.logger.info("步骤2: 生成AI总结...")
                     summary = await self.summary_generator.generate_summary(subtitle)
 
                     if not summary:
                         error_msg = f"生成总结失败: {video_url}"
                         self.logger.error(error_msg)
                         failed_videos.append(video_url)
-                        summary_contents.append(f"❌ AI总结生成失败")
+                        detail = getattr(self.ai_client, "last_error", None)
+                        if detail:
+                            summary_contents.append(f"❌ AI总结生成失败: {detail}")
+                        else:
+                            summary_contents.append("❌ AI总结生成失败")
                         continue
 
                     self.logger.info(f"总结生成成功，长度: {len(summary)} 字符")
@@ -156,10 +164,18 @@ class AISummaryService:
                 # 发送全部失败通知
                 if self.feishu_bot:
                     try:
+                        details = []
+                        for idx, url in enumerate(failed_videos):
+                            reason = (
+                                summary_contents[idx]
+                                if idx < len(summary_contents)
+                                else ""
+                            )
+                            details.append(f"{url}\n{reason}".strip())
                         await self.feishu_bot.send_system_notification(
                             self.feishu_bot.LEVEL_ERROR,
                             "AI总结服务失败",
-                            f"{error_msg}\n\n失败的视频:\n" + "\n".join(failed_videos),
+                            f"{error_msg}\n\n失败详情:\n" + "\n\n".join(details),
                         )
                     except Exception:
                         pass

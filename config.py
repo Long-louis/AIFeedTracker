@@ -66,6 +66,14 @@ AI_CONFIG = {
     "api_key": os.getenv("AI_API_KEY"),
     "base_url": os.getenv("AI_BASE_URL"),  # 可选，不设置则根据service自动选择
     "model": os.getenv("AI_MODEL"),  # 可选，不设置则根据service自动选择
+    # 适配长视频总结：按模型上下文窗口做 token 预算（DeepSeek 文档：128K）
+    "context_window_tokens": int(os.getenv("AI_CONTEXT_WINDOW_TOKENS", "128000")),
+    # DeepSeek-chat 默认 max output 4K（可在 .env 覆盖；若你开到 8K 也可写 8000）
+    "max_output_tokens": int(os.getenv("AI_MAX_OUTPUT_TOKENS", "4000")),
+    # 分段(map)阶段每段输出 token 上限
+    "map_max_output_tokens": int(os.getenv("AI_MAP_MAX_OUTPUT_TOKENS", "900")),
+    # tiktoken 编码名（DeepSeek OpenAI-compat 通常可用 cl100k_base；如你确认其它编码可覆盖）
+    "token_encoding": os.getenv("AI_TOKEN_ENCODING", "cl100k_base"),
 }
 
 # 反爬虫配置

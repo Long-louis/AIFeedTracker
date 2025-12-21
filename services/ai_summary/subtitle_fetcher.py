@@ -68,6 +68,9 @@ class SubtitleFetcher:
     def __init__(self):
         self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
 
+        # 记录最近一次失败原因，便于上层展示到推送里
+        self.last_error: Optional[str] = None
+
         # 初始化B站凭证（如果配置了的话）
         self.credential = None
         sessdata = BILIBILI_CONFIG.get("SESSDATA")
@@ -91,9 +94,12 @@ class SubtitleFetcher:
             # 匹配BV号
             bv_match = re.search(r"BV([a-zA-Z0-9]+)", video_url)
             if bv_match:
+                self.last_error = None
                 return f"BV{bv_match.group(1)}"
+            self.last_error = "无法从URL中提取BV号"
             return None
         except Exception as e:
+            self.last_error = str(e)
             self.logger.error(f"提取BV号失败: {e}")
             return None
 
@@ -108,6 +114,7 @@ class SubtitleFetcher:
             字幕文本内容（纯文本，包含时间戳行前缀），失败返回None
         """
         try:
+            self.last_error = None
             # 1. 解析BV号
             bvid = self.extract_bvid(video_url)
             if not bvid:
@@ -120,6 +127,7 @@ class SubtitleFetcher:
             v = video.Video(bvid=bvid, credential=self.credential)
             video_info = await v.get_info()
             if not video_info or "cid" not in video_info:
+                self.last_error = f"无法获取视频 {bvid} 的cid"
                 self.logger.error(f"无法获取视频 {bvid} 的cid")
                 return None
 
@@ -130,11 +138,13 @@ class SubtitleFetcher:
             subtitle_info = await v.get_subtitle(cid=cid)
 
             if not subtitle_info or "subtitles" not in subtitle_info:
+                self.last_error = f"视频 {bvid} 没有可用的字幕"
                 self.logger.warning(f"视频 {bvid} 没有可用的字幕")
                 return None
 
             subtitles = subtitle_info["subtitles"]
             if not subtitles:
+                self.last_error = f"视频 {bvid} 字幕列表为空"
                 self.logger.warning(f"视频 {bvid} 字幕列表为空")
                 return None
 
@@ -167,6 +177,7 @@ class SubtitleFetcher:
             # 5. 获取字幕URL并下载
             subtitle_url = selected_subtitle.get("subtitle_url")
             if not subtitle_url:
+                self.last_error = "字幕URL为空"
                 self.logger.error("字幕URL为空")
                 return None
 
@@ -182,9 +193,11 @@ class SubtitleFetcher:
             self.logger.info(
                 f"成功获取视频 {bvid} 的字幕，长度: {len(subtitle_text)} 字符"
             )
+            self.last_error = None
             return subtitle_text
 
         except Exception as e:
+            self.last_error = str(e)
             self.logger.error(f"获取字幕失败: {e}", exc_info=True)
             return None
 
@@ -204,6 +217,7 @@ class SubtitleFetcher:
                     subtitle_url, timeout=aiohttp.ClientTimeout(total=30)
                 ) as resp:
                     if resp.status != 200:
+                        self.last_error = f"下载字幕失败，状态码: {resp.status}"
                         self.logger.error(f"下载字幕失败，状态码: {resp.status}")
                         return None
 
@@ -211,16 +225,19 @@ class SubtitleFetcher:
 
             # 解析字幕内容
             if "body" not in subtitle_data:
+                self.last_error = "字幕数据格式错误，缺少body字段"
                 self.logger.error("字幕数据格式错误，缺少body字段")
                 return None
 
             body = subtitle_data["body"]
             if not isinstance(body, list):
+                self.last_error = "字幕body不是列表格式"
                 self.logger.error("字幕body不是列表格式")
                 return None
 
             return self.subtitle_body_to_text(body)
 
         except Exception as e:
+            self.last_error = str(e)
             self.logger.error(f"下载字幕失败: {e}")
             return None

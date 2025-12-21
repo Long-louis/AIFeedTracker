@@ -12,7 +12,7 @@ import os
 import random
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -182,7 +182,9 @@ class MonitorService:
             if author and isinstance(author, dict):
                 pub_ts = author.get("pub_ts")
                 if pub_ts:
-                    dt = datetime.fromtimestamp(int(pub_ts))
+                    dt = datetime.fromtimestamp(
+                        int(pub_ts), tz=timezone(timedelta(hours=8))
+                    )
                     return f"发布时间：{dt.strftime('%Y-%m-%d %H:%M:%S')}"
 
                 pub_time = author.get("pub_time")
@@ -891,7 +893,10 @@ class MonitorService:
                 elif ok and links:
                     summary_text = f"[AI总结链接]({links[0]})"
                 else:
-                    summary_text = f"AI总结失败：{message}"
+                    detail = ""
+                    if contents and contents[0]:
+                        detail = f"\n\n{contents[0]}"
+                    summary_text = f"AI总结失败：{message}{detail}"
         except Exception as e:
             self.logger.error(f"AI总结异常: {e}")
             summary_text = f"AI总结异常：{str(e)}"

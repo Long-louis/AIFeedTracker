@@ -72,6 +72,9 @@ class AIClient:
             f"AI客户端初始化成功: service={self.service}, base_url={self.base_url}, model={self.model}"
         )
 
+        # 记录最近一次调用失败原因，便于上层展示（例如推送到飞书）
+        self.last_error: Optional[str] = None
+
     async def chat_completion(
         self,
         messages: list,
@@ -105,15 +108,18 @@ class AIClient:
             # 提取返回内容
             if response.choices and len(response.choices) > 0:
                 content = response.choices[0].message.content
+                self.last_error = None
                 self.logger.info(
                     f"AI响应成功，长度: {len(content) if content else 0} 字符"
                 )
                 return content
             else:
-                self.logger.error("AI响应为空")
+                self.last_error = "AI响应为空"
+                self.logger.error(self.last_error)
                 return None
 
         except Exception as e:
+            self.last_error = str(e)
             self.logger.error(f"调用AI服务失败: {e}", exc_info=True)
             return None
 
@@ -149,5 +155,6 @@ class AIClient:
             return await self.chat_completion(messages, temperature=0.7)
 
         except Exception as e:
+            self.last_error = str(e)
             self.logger.error(f"文本总结失败: {e}")
             return None

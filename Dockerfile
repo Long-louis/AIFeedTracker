@@ -22,8 +22,9 @@ RUN pip install uv -i https://mirrors.aliyun.com/pypi/simple/
 # 复制依赖文件
 COPY pyproject.toml uv.lock ./
 
-# 安装项目依赖（增加超时时间以应对网络环境）
+# 配置 uv 使用国内 PyPI 镜像源并安装项目依赖
 ENV UV_HTTP_TIMEOUT=300
+ENV UV_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
 RUN uv sync --frozen
 
 # 复制项目代码

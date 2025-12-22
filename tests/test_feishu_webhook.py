@@ -178,7 +178,12 @@ class TestFeishuWebhookPayload(unittest.IsolatedAsyncioTestCase):
             calls = []
 
             async def _fake_send_app(
-                app_cfg, influencer, platform, markdown_content, addition_title="", addition_subtitle=""
+                app_cfg,
+                influencer,
+                platform,
+                markdown_content,
+                addition_title="",
+                addition_subtitle="",
             ):
                 calls.append(
                     (app_cfg["app_id"], influencer, platform, markdown_content)

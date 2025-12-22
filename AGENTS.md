@@ -19,7 +19,7 @@
 	- `aiohttp`（HTTP）
 	- `python-dotenv`（读取 `.env`）
 	- `openai`（兼容 DeepSeek/智谱/通义等 OpenAI 接口）
-- 本项目当前部署于别名`huaweicloud`的ssh远程服务器的docker compose，当进行相关部署操作和debug时请你决定应不应该在远程服务器执行。
+- 本项目当前部署于别名 `huaweicloud` 的 SSH 远程服务器，使用 **systemd 原生运行**（非 Docker）。部署操作详见 `docs/DEPLOY_AUTOMATION.md`。
 ## 重要约束（减少返工）
 
 - **B 站相关实现**：优先参考 `bilibili-api-python` 文档（需要查询时请用 deepwiki）。
@@ -122,19 +122,25 @@ uv run python -m unittest discover -s tests -p "test_*.py" -q
 
 仓库当前未内置 ruff/black/flake8 配置与命令。变更时请尽量遵循现有代码风格，并优先添加/更新单测来防回归。
 
-## Docker/服务器部署相关
+## 服务器部署
 
-- Dockerfile：两阶段构建，镜像内自带 `.venv`，默认命令 `python main.py --mode service`
-- Compose：`deploy/docker-compose.yml`
-	- 运行时环境变量来自 `deploy/.env`（从 `deploy/.env.example` 复制）
-	- `../data`、`../log` 挂载到容器 `/app/data`、`/app/log`
+项目使用 **systemd 原生部署**（非 Docker），详见 `docs/DEPLOY_AUTOMATION.md`。
 
-仓库提供脚本：
+常用命令速查：
 
-- `scripts/deploy.sh`：`scp` 同步本地 `.env` → 服务器 `deploy/.env`，然后远端 `git pull` + `docker compose up`
-- `scripts/commit-and-deploy.sh`：`git add/commit/push` 后调用 `deploy.sh`
+```bash
+# 更新代码并重启服务
+./scripts/deploy-native.sh
 
-注意：脚本内服务器别名默认为 `huaweicloud`，并假设部署目录 `/opt/aifeedtracker`；本地机器已配置免密登录该服务器。当前已经完成初次部署，使用deploy.sh脚本进行compose的重新运行。
+# 查看实时日志
+ssh huaweicloud 'sudo journalctl -u aifeedtracker -f'
+
+# 重启/停止服务
+ssh huaweicloud 'sudo systemctl restart aifeedtracker'
+ssh huaweicloud 'sudo systemctl stop aifeedtracker'
+```
+
+> 注：创作者配置 `bilibili_creators.json` 支持热重载，修改后无需重启服务。
 
 ## CI/校验流水线
 

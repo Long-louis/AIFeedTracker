@@ -19,7 +19,7 @@
 	- `aiohttp`（HTTP）
 	- `python-dotenv`（读取 `.env`）
 	- `openai`（兼容 DeepSeek/智谱/通义等 OpenAI 接口）
-
+- 本项目当前部署于别名`huaweicloud`的ssh远程服务器的docker compose，当进行相关部署操作和debug时请你决定应不应该在远程服务器执行。
 ## 重要约束（减少返工）
 
 - **B 站相关实现**：优先参考 `bilibili-api-python` 文档（需要查询时请用 deepwiki）。
@@ -122,7 +122,7 @@ uv run python -m unittest discover -s tests -p "test_*.py" -q
 
 仓库当前未内置 ruff/black/flake8 配置与命令。变更时请尽量遵循现有代码风格，并优先添加/更新单测来防回归。
 
-## Docker/服务器部署（可选）
+## Docker/服务器部署相关
 
 - Dockerfile：两阶段构建，镜像内自带 `.venv`，默认命令 `python main.py --mode service`
 - Compose：`deploy/docker-compose.yml`

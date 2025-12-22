@@ -78,7 +78,13 @@ class FeishuBot:
         return base64.b64encode(digest).decode("utf-8")
 
     def _build_template_card(
-        self, *, influencer: str, platform: str, markdown_content: str
+        self,
+        *,
+        influencer: str,
+        platform: str,
+        markdown_content: str,
+        addition_title: str = "",
+        addition_subtitle: str = "",
     ) -> Dict[str, Any]:
         if not self.template_id or self.template_id == "YOUR_TEMPLATE_ID":
             raise ValueError("未配置 FEISHU_TEMPLATE_ID")
@@ -92,6 +98,8 @@ class FeishuBot:
                     "Influencer": influencer,
                     "platform": platform,
                     "markdown_content": markdown_content,
+                    "addition_title": addition_title,
+                    "addition_subtitle": addition_subtitle,
                 },
             },
         }
@@ -258,6 +266,8 @@ class FeishuBot:
         influencer: str,
         platform: str,
         markdown_content: str,
+        addition_title: str = "",
+        addition_subtitle: str = "",
     ) -> bool:
         """使用飞书应用机器人发送模板卡片（懒加载 lark-oapi）。"""
         sdk = _try_import_lark_oapi()
@@ -290,6 +300,8 @@ class FeishuBot:
                         "Influencer": influencer,
                         "platform": platform,
                         "markdown_content": converted,
+                        "addition_title": addition_title,
+                        "addition_subtitle": addition_subtitle,
                     },
                 },
                 "type": "template",
@@ -326,6 +338,8 @@ class FeishuBot:
         platform: str,
         markdown_content: str,
         channel: Optional[str] = None,
+        addition_title: str = "",
+        addition_subtitle: str = "",
     ) -> bool:
         """发送内容卡片。
 
@@ -339,6 +353,8 @@ class FeishuBot:
                 influencer=influencer,
                 platform=platform,
                 markdown_content=markdown_content,
+                addition_title=addition_title,
+                addition_subtitle=addition_subtitle,
             )
             payload: Dict[str, Any] = {"msg_type": "interactive", "card": card}
 
@@ -348,7 +364,12 @@ class FeishuBot:
             # app channel
             if ch_type == "app":
                 ok = await self._send_via_app_template_card(
-                    cfg, influencer, platform, markdown_content
+                    cfg,
+                    influencer,
+                    platform,
+                    markdown_content,
+                    addition_title,
+                    addition_subtitle,
                 )
                 return bool(ok)
 

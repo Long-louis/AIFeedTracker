@@ -703,6 +703,7 @@ class MonitorService:
             "哔哩哔哩",
             markdown_content,
             channel=creator.feishu_channel,
+            addition_title="置顶评论更新",
         )
 
     @staticmethod
@@ -983,6 +984,7 @@ class MonitorService:
                 "哔哩哔哩",
                 markdown_content,
                 channel=creator.feishu_channel,
+                addition_title="发布新视频",
             )
 
     async def _fetch_video_comments(
@@ -1075,6 +1077,7 @@ class MonitorService:
                 "哔哩哔哩",
                 markdown_content,
                 channel=creator.feishu_channel,
+                addition_title="发布新动态",
             )
 
     async def monitor_single_creator(self, creator: Creator) -> None:

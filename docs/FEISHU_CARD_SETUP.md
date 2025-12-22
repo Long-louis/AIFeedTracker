@@ -51,12 +51,22 @@
      - **模板ID** (`template_id`)
      - **版本名称** (`template_version_name`)
 
+#### 卡片变量说明（v1.0.2）
+
+| 变量名 | 说明 | 示例 |
+|--------|------|------|
+| `Influencer` | 博主名称（主标题） | 某某博主 |
+| `addition_title` | 主标题附加文字（跟在 Influencer 后） | 发布新视频、发布新动态、置顶评论更新 |
+| `platform` | 平台名称（副标题） | 哔哩哔哩 |
+| `addition_subtitle` | 副标题附加文字（跟在 platform 后） | 预留，暂未使用 |
+| `markdown_content` | Markdown 格式正文内容 | 视频标题、AI总结等 |
+
 #### 卡片预览效果
 
 ```
 ┌──────────────────────────────────────┐
-│ 哔哩哔哩                              │  ← 蓝色标题栏（platform）
-│ 某某博主                              │  ← 副标题（Influencer）
+│ 某某博主 发布新视频                    │  ← 主标题（Influencer + addition_title）
+│ 哔哩哔哩                              │  ← 副标题（platform + addition_subtitle）
 ├──────────────────────────────────────┤
 │                                      │
 │ 📌 核心观点                           │  ← Markdown内容

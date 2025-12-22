@@ -19,7 +19,7 @@
 	- `aiohttp`（HTTP）
 	- `python-dotenv`（读取 `.env`）
 	- `openai`（兼容 DeepSeek/智谱/通义等 OpenAI 接口）
-- 本项目当前部署于别名 `huaweicloud` 的 SSH 远程服务器，使用 **systemd 原生运行**（非 Docker）。部署操作详见 `docs/DEPLOY_AUTOMATION.md`。
+- 本项目部署于远程服务器，部署方式和操作命令详见 `docs/DEPLOY_AUTOMATION.md`。
 ## 重要约束（减少返工）
 
 - **B 站相关实现**：优先参考 `bilibili-api-python` 文档（需要查询时请用 deepwiki）。
@@ -124,23 +124,7 @@ uv run python -m unittest discover -s tests -p "test_*.py" -q
 
 ## 服务器部署
 
-项目使用 **systemd 原生部署**（非 Docker），详见 `docs/DEPLOY_AUTOMATION.md`。
-
-常用命令速查：
-
-```bash
-# 更新代码并重启服务
-./scripts/deploy-native.sh
-
-# 查看实时日志
-ssh huaweicloud 'sudo journalctl -u aifeedtracker -f'
-
-# 重启/停止服务
-ssh huaweicloud 'sudo systemctl restart aifeedtracker'
-ssh huaweicloud 'sudo systemctl stop aifeedtracker'
-```
-
-> 注：创作者配置 `bilibili_creators.json` 支持热重载，修改后无需重启服务。
+详见 `docs/DEPLOY_AUTOMATION.md`。
 
 ## CI/校验流水线
 

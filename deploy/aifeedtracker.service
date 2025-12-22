@@ -1,0 +1,21 @@
+[Unit]
+Description=AI Feed Tracker - B站动态监控服务
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/aifeedtracker
+Environment="PATH=/opt/aifeedtracker/.venv/bin:/usr/local/bin:/usr/bin:/bin"
+EnvironmentFile=/opt/aifeedtracker/.env
+ExecStart=/opt/aifeedtracker/.venv/bin/python main.py --mode service
+Restart=always
+RestartSec=10
+
+# 日志配置
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=aifeedtracker
+
+[Install]
+WantedBy=multi-user.target

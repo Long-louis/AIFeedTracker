@@ -42,6 +42,11 @@ echo "🔨 重启服务 (mode=${BUILD_MODE})..."
 ssh "$SERVER" << EOF
 set -euo pipefail
 cd "$DEPLOY_PATH/deploy"
+
+# 启用 BuildKit 以支持缓存挂载
+export DOCKER_BUILDKIT=1
+export COMPOSE_DOCKER_CLI_BUILD=1
+
 if [ "${BUILD_MODE}" = "rebuild" ]; then
     echo "🔧 正在重新构建镜像 (no-cache)..."
     docker compose build --no-cache

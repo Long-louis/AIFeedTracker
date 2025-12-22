@@ -25,6 +25,75 @@ from config import build_bilibili_credential
 from .comment_fetcher import CommentFetcher
 
 
+class ConfigFileWatcher:
+    """配置文件监控器，用于检测文件变化并触发热重载"""
+
+    def __init__(self, file_path: str, check_interval: int = 600):
+        """
+        初始化配置文件监控器
+
+        Args:
+            file_path: 要监控的文件路径
+            check_interval: 检查间隔（秒），默认10秒
+        """
+        self.file_path = file_path
+        self.check_interval = check_interval
+        self.logger = logging.getLogger(f"{__name__}.ConfigFileWatcher")
+        self._last_mtime: Optional[float] = None
+        self._last_content_hash: Optional[str] = None
+        self._running = False
+
+    def _get_file_info(self) -> Tuple[Optional[float], Optional[str]]:
+        """获取文件的修改时间和内容哈希"""
+        try:
+            if not os.path.exists(self.file_path):
+                return None, None
+            mtime = os.path.getmtime(self.file_path)
+            with open(self.file_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            # 使用简单的内容哈希来检测实际变化
+            content_hash = str(hash(content))
+            return mtime, content_hash
+        except Exception as e:
+            self.logger.warning(f"读取配置文件信息失败: {e}")
+            return None, None
+
+    def initialize(self) -> None:
+        """初始化文件状态（记录当前状态作为基准）"""
+        self._last_mtime, self._last_content_hash = self._get_file_info()
+        self.logger.info(f"配置文件监控已初始化: {self.file_path}")
+
+    def check_for_changes(self) -> bool:
+        """
+        检查文件是否有变化
+
+        Returns:
+            bool: 如果文件内容有变化返回 True
+        """
+        current_mtime, current_hash = self._get_file_info()
+
+        # 文件不存在或读取失败
+        if current_mtime is None:
+            return False
+
+        # 首次检查
+        if self._last_mtime is None:
+            self._last_mtime = current_mtime
+            self._last_content_hash = current_hash
+            return False
+
+        # 检查修改时间和内容哈希
+        if current_mtime != self._last_mtime or current_hash != self._last_content_hash:
+            self.logger.info(
+                f"检测到配置文件变化: mtime {self._last_mtime} -> {current_mtime}"
+            )
+            self._last_mtime = current_mtime
+            self._last_content_hash = current_hash
+            return True
+
+        return False
+
+
 @dataclass
 class Creator:
     """创作者信息"""
@@ -1085,46 +1154,118 @@ class MonitorService:
 
             scheduler = AsyncIOScheduler(timezone=self._SCHEDULER_TIMEZONE)
 
+            # 初始化配置文件监控器（热重载）
+            config_watcher = ConfigFileWatcher(self.CREATORS_PATH, check_interval=600)
+            config_watcher.initialize()
+
             async def _run_creator_job(c: Creator) -> None:
                 await self.process_creator(c)
 
-            for creator in creators:
-                # 若配置了 cron，则优先使用 cron 调度；否则回退到 interval
-                if creator.crons:
-                    for idx, expr in enumerate(creator.crons):
-                        if not isinstance(expr, str) or not expr.strip():
-                            continue
-                        trigger = CronTrigger.from_crontab(
-                            expr.strip(), timezone=self._SCHEDULER_TIMEZONE
-                        )
-                        scheduler.add_job(
+            def _setup_creator_jobs(
+                sched: AsyncIOScheduler, creator_list: List[Creator]
+            ) -> None:
+                """为创作者列表设置调度任务"""
+                for creator in creator_list:
+                    if creator.crons:
+                        for idx, expr in enumerate(creator.crons):
+                            if not isinstance(expr, str) or not expr.strip():
+                                continue
+                            trigger = CronTrigger.from_crontab(
+                                expr.strip(), timezone=self._SCHEDULER_TIMEZONE
+                            )
+                            sched.add_job(
+                                _run_creator_job,
+                                trigger=trigger,
+                                args=[creator],
+                                id=f"monitor:{creator.uid}:{idx}",
+                                max_instances=1,
+                                coalesce=True,
+                                jitter=int(creator.jitter_seconds or 0) or None,
+                                replace_existing=True,
+                            )
+                            self.logger.info(
+                                f"已为 {creator.name} 设置 cron: {expr.strip()} (jitter={creator.jitter_seconds}s)"
+                            )
+                    else:
+                        sched.add_job(
                             _run_creator_job,
-                            trigger=trigger,
+                            trigger="interval",
+                            seconds=max(30, int(creator.check_interval)),
                             args=[creator],
-                            id=f"monitor:{creator.uid}:{idx}",
+                            id=f"monitor:{creator.uid}:interval",
                             max_instances=1,
                             coalesce=True,
                             jitter=int(creator.jitter_seconds or 0) or None,
                             replace_existing=True,
                         )
                         self.logger.info(
-                            f"已为 {creator.name} 设置 cron: {expr.strip()} (jitter={creator.jitter_seconds}s)"
+                            f"已为 {creator.name} 设置 interval: {creator.check_interval}s (jitter={creator.jitter_seconds}s)"
                         )
-                else:
-                    scheduler.add_job(
-                        _run_creator_job,
-                        trigger="interval",
-                        seconds=max(30, int(creator.check_interval)),
-                        args=[creator],
-                        id=f"monitor:{creator.uid}:interval",
-                        max_instances=1,
-                        coalesce=True,
-                        jitter=int(creator.jitter_seconds or 0) or None,
-                        replace_existing=True,
-                    )
-                    self.logger.info(
-                        f"已为 {creator.name} 设置 interval: {creator.check_interval}s (jitter={creator.jitter_seconds}s)"
-                    )
+
+            async def _reload_config(sched: AsyncIOScheduler) -> None:
+                """热重载配置文件"""
+                self.logger.info("检测到配置文件变化，开始热重载...")
+
+                # 加载新配置
+                new_creators = self.load_creators_from_file()
+                if not new_creators:
+                    self.logger.warning("热重载失败：新配置为空或无效，保持当前配置")
+                    return
+
+                # 获取当前所有任务ID
+                old_job_ids = {
+                    job.id for job in sched.get_jobs() if job.id.startswith("monitor:")
+                }
+
+                # 移除所有旧的监控任务
+                for job_id in old_job_ids:
+                    try:
+                        sched.remove_job(job_id)
+                    except Exception:
+                        pass
+
+                # 对齐新创作者的 last_seen（避免补发）
+                if not self._allow_backfill_on_start:
+                    await self._prime_last_seen(new_creators)
+
+                # 添加新任务
+                _setup_creator_jobs(sched, new_creators)
+
+                self.logger.info(
+                    f"热重载完成：已更新 {len(new_creators)} 个创作者的监控任务"
+                )
+
+                # 发送热重载通知
+                if self.feishu_bot:
+                    try:
+                        creator_names = ", ".join([c.name for c in new_creators[:5]])
+                        if len(new_creators) > 5:
+                            creator_names += f" 等{len(new_creators)}个"
+                        await self.feishu_bot.send_system_notification(
+                            self.feishu_bot.LEVEL_INFO,
+                            "配置热重载成功",
+                            f"已自动重新加载创作者配置\n\n**当前监控:** {creator_names}",
+                        )
+                    except Exception:
+                        pass
+
+            # 添加配置文件监控任务（每10秒检查一次）
+            async def _check_config_changes() -> None:
+                if config_watcher.check_for_changes():
+                    await _reload_config(scheduler)
+
+            scheduler.add_job(
+                _check_config_changes,
+                trigger="interval",
+                seconds=10,
+                id="config_watcher",
+                max_instances=1,
+                coalesce=True,
+            )
+            self.logger.info("配置文件热重载监控已启动（每10秒检查一次）")
+
+            # 设置初始创作者任务
+            _setup_creator_jobs(scheduler, creators)
 
             scheduler.start()
 

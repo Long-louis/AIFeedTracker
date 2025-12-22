@@ -7,12 +7,29 @@
 
 import logging
 import re
+from enum import Enum
 from typing import Optional
 
 import aiohttp
 from bilibili_api import Credential, video
+from bilibili_api.exceptions import ResponseCodeException
 
 from config import BILIBILI_CONFIG
+
+
+class SubtitleErrorType(Enum):
+    """字幕获取失败类型"""
+
+    NONE = "none"  # 无错误
+    INVALID_URL = "invalid_url"  # URL格式错误
+    VIDEO_NOT_FOUND = "video_not_found"  # 视频不存在
+    NO_SUBTITLE = "no_subtitle"  # 视频没有字幕
+    COOKIE_EXPIRED = "cookie_expired"  # Cookie已过期/失效
+    CREDENTIAL_ERROR = "credential_error"  # 凭证错误（未登录或权限不足）
+    NETWORK_ERROR = "network_error"  # 网络错误
+    DOWNLOAD_ERROR = "download_error"  # 字幕下载失败
+    PARSE_ERROR = "parse_error"  # 字幕解析失败
+    UNKNOWN = "unknown"  # 未知错误
 
 
 class SubtitleFetcher:
@@ -70,6 +87,8 @@ class SubtitleFetcher:
 
         # 记录最近一次失败原因，便于上层展示到推送里
         self.last_error: Optional[str] = None
+        # 记录失败类型，便于上层判断是否需要重试或提示用户
+        self.last_error_type: SubtitleErrorType = SubtitleErrorType.NONE
 
         # 初始化B站凭证（如果配置了的话）
         self.credential = None
@@ -95,13 +114,49 @@ class SubtitleFetcher:
             bv_match = re.search(r"BV([a-zA-Z0-9]+)", video_url)
             if bv_match:
                 self.last_error = None
+                self.last_error_type = SubtitleErrorType.NONE
                 return f"BV{bv_match.group(1)}"
             self.last_error = "无法从URL中提取BV号"
+            self.last_error_type = SubtitleErrorType.INVALID_URL
             return None
         except Exception as e:
             self.last_error = str(e)
+            self.last_error_type = SubtitleErrorType.INVALID_URL
             self.logger.error(f"提取BV号失败: {e}")
             return None
+
+    def _classify_api_error(self, e: ResponseCodeException) -> SubtitleErrorType:
+        """
+        根据B站API错误码分类错误类型
+
+        常见错误码:
+        - -101: 账号未登录
+        - -111: csrf校验失败
+        - -400: 请求错误
+        - -404: 视频不存在
+        - -403: 权限不足
+        - -352: 风控校验失败（Cookie可能失效）
+        - -799: 请求过于频繁
+        """
+        code = e.code
+
+        # 登录/凭证相关错误
+        if code in (-101, -111, -352):
+            return SubtitleErrorType.COOKIE_EXPIRED
+
+        # 权限相关错误
+        if code == -403:
+            return SubtitleErrorType.CREDENTIAL_ERROR
+
+        # 视频不存在
+        if code == -404:
+            return SubtitleErrorType.VIDEO_NOT_FOUND
+
+        # 请求错误
+        if code == -400:
+            return SubtitleErrorType.INVALID_URL
+
+        return SubtitleErrorType.UNKNOWN
 
     async def fetch_subtitle(self, video_url: str) -> Optional[str]:
         """
@@ -115,6 +170,8 @@ class SubtitleFetcher:
         """
         try:
             self.last_error = None
+            self.last_error_type = SubtitleErrorType.NONE
+
             # 1. 解析BV号
             bvid = self.extract_bvid(video_url)
             if not bvid:
@@ -125,27 +182,72 @@ class SubtitleFetcher:
 
             # 2. 创建Video对象并获取视频信息以获得cid
             v = video.Video(bvid=bvid, credential=self.credential)
-            video_info = await v.get_info()
+
+            try:
+                video_info = await v.get_info()
+            except ResponseCodeException as e:
+                error_type = self._classify_api_error(e)
+                self.last_error_type = error_type
+
+                if error_type == SubtitleErrorType.COOKIE_EXPIRED:
+                    self.last_error = (
+                        f"B站Cookie已失效(错误码:{e.code})，请重新获取登录凭证"
+                    )
+                elif error_type == SubtitleErrorType.VIDEO_NOT_FOUND:
+                    self.last_error = f"视频 {bvid} 不存在或已被删除"
+                elif error_type == SubtitleErrorType.CREDENTIAL_ERROR:
+                    self.last_error = f"权限不足，无法访问视频 {bvid}"
+                else:
+                    self.last_error = f"获取视频信息失败(错误码:{e.code}): {e.msg}"
+
+                self.logger.error(self.last_error)
+                return None
+
             if not video_info or "cid" not in video_info:
                 self.last_error = f"无法获取视频 {bvid} 的cid"
-                self.logger.error(f"无法获取视频 {bvid} 的cid")
+                self.last_error_type = SubtitleErrorType.VIDEO_NOT_FOUND
+                self.logger.error(self.last_error)
                 return None
 
             cid = video_info["cid"]
             self.logger.info(f"获取到视频cid: {cid}")
 
             # 3. 传入cid参数获取字幕
-            subtitle_info = await v.get_subtitle(cid=cid)
+            try:
+                subtitle_info = await v.get_subtitle(cid=cid)
+            except ResponseCodeException as e:
+                error_type = self._classify_api_error(e)
+                self.last_error_type = error_type
+
+                if error_type == SubtitleErrorType.COOKIE_EXPIRED:
+                    self.last_error = (
+                        f"B站Cookie已失效(错误码:{e.code})，请重新获取登录凭证"
+                    )
+                elif error_type == SubtitleErrorType.CREDENTIAL_ERROR:
+                    self.last_error = (
+                        f"权限不足，无法获取视频 {bvid} 的字幕（可能需要登录或大会员）"
+                    )
+                else:
+                    self.last_error = f"获取字幕信息失败(错误码:{e.code}): {e.msg}"
+
+                self.logger.error(self.last_error)
+                return None
 
             if not subtitle_info or "subtitles" not in subtitle_info:
-                self.last_error = f"视频 {bvid} 没有可用的字幕"
-                self.logger.warning(f"视频 {bvid} 没有可用的字幕")
+                self.last_error = (
+                    f"视频 {bvid} 没有可用的字幕（UP主未开启字幕或视频无语音）"
+                )
+                self.last_error_type = SubtitleErrorType.NO_SUBTITLE
+                self.logger.warning(self.last_error)
                 return None
 
             subtitles = subtitle_info["subtitles"]
             if not subtitles:
-                self.last_error = f"视频 {bvid} 字幕列表为空"
-                self.logger.warning(f"视频 {bvid} 字幕列表为空")
+                self.last_error = (
+                    f"视频 {bvid} 字幕列表为空（UP主未开启AI字幕或视频无语音内容）"
+                )
+                self.last_error_type = SubtitleErrorType.NO_SUBTITLE
+                self.logger.warning(self.last_error)
                 return None
 
             # 4. 选择字幕（优先AI生成的中文字幕）
@@ -194,10 +296,31 @@ class SubtitleFetcher:
                 f"成功获取视频 {bvid} 的字幕，长度: {len(subtitle_text)} 字符"
             )
             self.last_error = None
+            self.last_error_type = SubtitleErrorType.NONE
             return subtitle_text
 
+        except ResponseCodeException as e:
+            # 捕获bilibili-api的API错误
+            error_type = self._classify_api_error(e)
+            self.last_error_type = error_type
+
+            if error_type == SubtitleErrorType.COOKIE_EXPIRED:
+                self.last_error = (
+                    f"B站Cookie已失效(错误码:{e.code})，请重新获取登录凭证"
+                )
+            else:
+                self.last_error = f"B站API错误(错误码:{e.code}): {e.msg}"
+
+            self.logger.error(self.last_error)
+            return None
+        except aiohttp.ClientError as e:
+            self.last_error = f"网络请求失败: {e}"
+            self.last_error_type = SubtitleErrorType.NETWORK_ERROR
+            self.logger.error(self.last_error)
+            return None
         except Exception as e:
             self.last_error = str(e)
+            self.last_error_type = SubtitleErrorType.UNKNOWN
             self.logger.error(f"获取字幕失败: {e}", exc_info=True)
             return None
 
@@ -218,7 +341,8 @@ class SubtitleFetcher:
                 ) as resp:
                     if resp.status != 200:
                         self.last_error = f"下载字幕失败，状态码: {resp.status}"
-                        self.logger.error(f"下载字幕失败，状态码: {resp.status}")
+                        self.last_error_type = SubtitleErrorType.DOWNLOAD_ERROR
+                        self.logger.error(self.last_error)
                         return None
 
                     subtitle_data = await resp.json()
@@ -226,18 +350,26 @@ class SubtitleFetcher:
             # 解析字幕内容
             if "body" not in subtitle_data:
                 self.last_error = "字幕数据格式错误，缺少body字段"
-                self.logger.error("字幕数据格式错误，缺少body字段")
+                self.last_error_type = SubtitleErrorType.PARSE_ERROR
+                self.logger.error(self.last_error)
                 return None
 
             body = subtitle_data["body"]
             if not isinstance(body, list):
                 self.last_error = "字幕body不是列表格式"
-                self.logger.error("字幕body不是列表格式")
+                self.last_error_type = SubtitleErrorType.PARSE_ERROR
+                self.logger.error(self.last_error)
                 return None
 
             return self.subtitle_body_to_text(body)
 
+        except aiohttp.ClientError as e:
+            self.last_error = f"下载字幕网络错误: {e}"
+            self.last_error_type = SubtitleErrorType.NETWORK_ERROR
+            self.logger.error(self.last_error)
+            return None
         except Exception as e:
-            self.last_error = str(e)
-            self.logger.error(f"下载字幕失败: {e}")
+            self.last_error = f"下载字幕失败: {e}"
+            self.last_error_type = SubtitleErrorType.DOWNLOAD_ERROR
+            self.logger.error(self.last_error)
             return None

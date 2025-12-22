@@ -11,7 +11,7 @@ from typing import Dict, List, Tuple
 from config import AI_CONFIG
 
 from .ai_client import AIClient
-from .subtitle_fetcher import SubtitleFetcher
+from .subtitle_fetcher import SubtitleErrorType, SubtitleFetcher
 from .summary_generator import SummaryGenerator
 
 
@@ -98,11 +98,25 @@ class AISummaryService:
                         error_msg = f"获取字幕失败: {video_url}"
                         self.logger.error(error_msg)
                         failed_videos.append(video_url)
-                        detail = getattr(self.subtitle_fetcher, "last_error", None)
-                        if detail:
+
+                        # 根据错误类型生成详细的失败原因
+                        error_type = self.subtitle_fetcher.last_error_type
+                        detail = self.subtitle_fetcher.last_error
+
+                        if error_type == SubtitleErrorType.COOKIE_EXPIRED:
+                            summary_contents.append(f"❌ Cookie已失效: {detail}")
+                        elif error_type == SubtitleErrorType.CREDENTIAL_ERROR:
+                            summary_contents.append(f"❌ 凭证权限不足: {detail}")
+                        elif error_type == SubtitleErrorType.NO_SUBTITLE:
+                            summary_contents.append(f"❌ 视频无字幕: {detail}")
+                        elif error_type == SubtitleErrorType.VIDEO_NOT_FOUND:
+                            summary_contents.append(f"❌ 视频不存在: {detail}")
+                        elif error_type == SubtitleErrorType.NETWORK_ERROR:
+                            summary_contents.append(f"❌ 网络错误: {detail}")
+                        elif detail:
                             summary_contents.append(f"❌ 获取字幕失败: {detail}")
                         else:
-                            summary_contents.append("❌ 获取字幕失败")
+                            summary_contents.append("❌ 获取字幕失败: 未知原因")
                         continue
 
                     self.logger.info(f"字幕获取成功，长度: {len(subtitle)} 字符")

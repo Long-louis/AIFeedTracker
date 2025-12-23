@@ -114,6 +114,11 @@ class FeishuBot:
             send_payload["timestamp"] = str(ts)
             send_payload["sign"] = self._gen_webhook_sign(ts, webhook.secret)
 
+        # 调试日志：打印发送的 template_variable
+        if "card" in send_payload and "data" in send_payload["card"]:
+            tv = send_payload["card"]["data"].get("template_variable", {})
+            self.logger.info(f"发送卡片 template_variable: addition_title={tv.get('addition_title')!r}, Influencer={tv.get('Influencer')!r}")
+
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(

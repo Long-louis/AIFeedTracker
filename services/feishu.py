@@ -21,7 +21,7 @@ from typing import Any, Dict, Optional
 
 import aiohttp
 
-from config import FEISHU_TEMPLATE_ID, FEISHU_TEMPLATE_VERSION
+from config import FEISHU_TEMPLATE_ID, FEISHU_TEMPLATE_VERSION, FEISHU_APP_ID, FEISHU_APP_SECRET
 
 from .feishu_channels import FeishuChannelRegistry, WebhookConfig
 
@@ -64,6 +64,15 @@ class FeishuBot:
         self.template_id = FEISHU_TEMPLATE_ID
         self.template_version_name = FEISHU_TEMPLATE_VERSION
         self.registry = FeishuChannelRegistry.load()
+
+        # 用于图片上传的应用配置（从 .env 读取）
+        self._image_upload_app_cfg: Optional[Dict[str, str]] = None
+        if FEISHU_APP_ID and FEISHU_APP_SECRET:
+            self._image_upload_app_cfg = {
+                "app_id": FEISHU_APP_ID,
+                "app_secret": FEISHU_APP_SECRET,
+            }
+            self.logger.info("已配置飞书应用凭证，图片上传功能可用")
 
         if not self.template_id or self.template_id == "YOUR_TEMPLATE_ID":
             self.logger.warning("未配置 FEISHU_TEMPLATE_ID：模板卡片将无法发送")
@@ -350,14 +359,23 @@ class FeishuBot:
 
         - 默认走 defaults.content
         - creator 可传入 channel 覆盖（例如 webhook:vip）
+        - 如果配置了飞书应用凭证，会自动转换 Markdown 中的图片
         """
 
         try:
             ch_type, ch_name, cfg = self._get_channel("content", channel)
+
+            # 如果有应用凭证，转换 Markdown 中的图片 URL 为飞书 image_key
+            processed_content = markdown_content
+            if self._image_upload_app_cfg:
+                processed_content = await self.convert_images_in_markdown(
+                    markdown_content, self._image_upload_app_cfg
+                )
+
             card = self._build_template_card(
                 influencer=influencer,
                 platform=platform,
-                markdown_content=markdown_content,
+                markdown_content=processed_content,
                 addition_title=addition_title,
                 addition_subtitle=addition_subtitle,
             )
@@ -372,7 +390,7 @@ class FeishuBot:
                     cfg,
                     influencer,
                     platform,
-                    markdown_content,
+                    processed_content,
                     addition_title,
                     addition_subtitle,
                 )

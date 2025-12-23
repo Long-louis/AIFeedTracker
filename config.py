@@ -32,6 +32,10 @@ if env_file.exists():
 FEISHU_TEMPLATE_ID = os.getenv("FEISHU_TEMPLATE_ID", "YOUR_TEMPLATE_ID")
 FEISHU_TEMPLATE_VERSION = os.getenv("FEISHU_TEMPLATE_VERSION", "1.0.0")
 
+# 飞书应用配置（用于上传图片等需要 API 的功能）
+FEISHU_APP_ID = os.getenv("app_id", "")
+FEISHU_APP_SECRET = os.getenv("app_secret", "")
+
 # 通道注册表配置文件路径（默认 data/feishu_channels.json）
 FEISHU_CHANNELS_CONFIG = os.getenv(
     "FEISHU_CHANNELS_CONFIG", str(project_root / "data" / "feishu_channels.json")

@@ -692,8 +692,7 @@ class MonitorService:
             charge_tag = "【充电】"
 
         markdown_content = (
-            f"**{charge_tag}发现新的置顶评论**\n\n"
-            f"**动态：** {title}\n\n"
+            f"**{charge_tag}动态：** {title}\n\n"
             f"---\n\n{pinned_md}\n\n---\n\n"
             f"[查看原动态]({url})"
         )
@@ -1279,11 +1278,17 @@ class MonitorService:
                 scheduler.shutdown(wait=False)
 
     async def _prime_last_seen(self, creators: List[Creator]) -> None:
-        """启动时对齐每个 UP 的 last_seen 到当前最新，不发送任何通知。"""
+        """启动时对齐每个 UP 的 last_seen 到当前最新，不发送任何通知。
+
+        仅对尚无 last_seen 记录的创作者进行对齐，已有记录的保持不变。
+        """
         if not creators:
             return
 
         for c in creators:
+            # 已有 last_seen 记录的跳过，避免覆盖
+            if self.state.get_last_seen(c.uid) is not None:
+                continue
             try:
                 data = await self.fetch_user_space_dynamics(c.uid, 1)
                 items = data.get("data", {}).get("items", []) or []
@@ -1292,6 +1297,7 @@ class MonitorService:
                 newest_id = items[0].get("id_str") or items[0].get("id")
                 if newest_id:
                     self.state.set_last_seen(c.uid, str(newest_id))
+                    self.logger.info(f"启动对齐：{c.name} 设置 last_seen={newest_id}")
             except Exception as e:
                 self.logger.warning(f"启动对齐 last_seen 失败: {c.name} ({c.uid}): {e}")
 

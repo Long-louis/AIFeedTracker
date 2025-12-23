@@ -450,9 +450,8 @@ class CommentFetcher:
                 for idx, pic in enumerate(pictures, 1):
                     img_src = pic.get("img_src", "")
                     if img_src:
-                        # 输出Markdown格式的图片链接
-                        # 飞书会自动处理这些链接并上传
-                        result += f"![评论图片{idx}]({img_src})\n\n"
+                        # 飞书Markdown不支持![](url)语法，使用可点击链接
+                        result += f"[查看图片{idx}]({img_src})\n\n"
 
             return result
 

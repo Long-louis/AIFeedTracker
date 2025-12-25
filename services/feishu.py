@@ -21,7 +21,12 @@ from typing import Any, Dict, Optional
 
 import aiohttp
 
-from config import FEISHU_TEMPLATE_ID, FEISHU_TEMPLATE_VERSION, FEISHU_APP_ID, FEISHU_APP_SECRET
+from config import (
+    FEISHU_APP_ID,
+    FEISHU_APP_SECRET,
+    FEISHU_TEMPLATE_ID,
+    FEISHU_TEMPLATE_VERSION,
+)
 
 from .feishu_channels import FeishuChannelRegistry, WebhookConfig
 
@@ -126,7 +131,9 @@ class FeishuBot:
         # 调试日志：打印发送的 template_variable
         if "card" in send_payload and "data" in send_payload["card"]:
             tv = send_payload["card"]["data"].get("template_variable", {})
-            self.logger.info(f"发送卡片 template_variable: addition_title={tv.get('addition_title')!r}, Influencer={tv.get('Influencer')!r}")
+            self.logger.info(
+                f"发送卡片 template_variable: addition_title={tv.get('addition_title')!r}, Influencer={tv.get('Influencer')!r}"
+            )
 
         try:
             async with aiohttp.ClientSession() as session:
@@ -197,7 +204,12 @@ class FeishuBot:
             )
 
             async with aiohttp.ClientSession() as session:
-                async with session.get(image_url) as response:
+                # B站图片需要 Referer 头才能访问
+                headers = {
+                    "Referer": "https://www.bilibili.com/",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                }
+                async with session.get(image_url, headers=headers) as response:
                     if response.status != 200:
                         self.logger.warning(
                             f"下载图片失败: {image_url}, status: {response.status}"

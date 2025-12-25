@@ -18,6 +18,9 @@ from .summary_generator import SummaryGenerator
 class AISummaryService:
     """AI视频总结服务"""
 
+    # 字幕获取重试配置
+    SUBTITLE_RETRY_DELAYS = [60, 120, 180]  # 重试间隔（秒）：1分钟、2分钟、3分钟
+
     def __init__(
         self,
         headless: bool = True,

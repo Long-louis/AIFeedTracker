@@ -11,10 +11,10 @@ from enum import Enum
 from typing import Optional
 
 import aiohttp
-from bilibili_api import Credential, video
+from bilibili_api import video
 from bilibili_api.exceptions import ResponseCodeException
 
-from config import BILIBILI_CONFIG
+from config import build_bilibili_credential
 
 
 class SubtitleErrorType(Enum):
@@ -90,14 +90,12 @@ class SubtitleFetcher:
         # 记录失败类型，便于上层判断是否需要重试或提示用户
         self.last_error_type: SubtitleErrorType = SubtitleErrorType.NONE
 
-        # 初始化B站凭证（如果配置了的话）
-        self.credential = None
-        sessdata = BILIBILI_CONFIG.get("SESSDATA")
-        if sessdata:
-            self.credential = Credential(sessdata=sessdata)
+        # 初始化B站凭证（使用完整凭证，包含 sessdata, bili_jct, buvid3 等）
+        self.credential = build_bilibili_credential()
+        if self.credential:
             self.logger.info("已加载B站登录凭证")
         else:
-            self.logger.warning("未配置B站SESSDATA，某些字幕可能无法获取")
+            self.logger.warning("未配置B站凭证，某些字幕可能无法获取")
 
     def extract_bvid(self, video_url: str) -> Optional[str]:
         """
@@ -158,6 +156,90 @@ class SubtitleFetcher:
 
         return SubtitleErrorType.UNKNOWN
 
+    async def _fetch_subtitle_list(
+        self, bvid: str, cid: int, aid: Optional[int] = None
+    ) -> list:
+        """
+        获取字幕列表，优先使用 dm/view 接口（更可靠）
+
+        Args:
+            bvid: 视频BV号
+            cid: 视频cid
+            aid: 视频aid（可选）
+
+        Returns:
+            字幕列表，失败返回空列表
+        """
+        subtitles = []
+
+        # 方法1: 使用 dm/view 接口（更可靠，能获取到 AI 字幕）
+        if aid:
+            try:
+                dm_view_url = (
+                    f"https://api.bilibili.com/x/v2/dm/view?type=1&oid={cid}&pid={aid}"
+                )
+                headers = {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                    "Referer": "https://www.bilibili.com/",
+                }
+
+                # 构建 cookies
+                cookies = {}
+                if self.credential:
+                    if self.credential.sessdata:
+                        cookies["SESSDATA"] = self.credential.sessdata
+                    if self.credential.bili_jct:
+                        cookies["bili_jct"] = self.credential.bili_jct
+                    if self.credential.buvid3:
+                        cookies["buvid3"] = self.credential.buvid3
+
+                async with aiohttp.ClientSession(
+                    cookies=cookies, headers=headers
+                ) as session:
+                    async with session.get(dm_view_url) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            if data.get("code") == 0:
+                                subtitle_info = data.get("data", {}).get("subtitle", {})
+                                subtitles = subtitle_info.get("subtitles", [])
+                                if subtitles:
+                                    self.logger.info(
+                                        f"通过 dm/view 接口获取到 {len(subtitles)} 个字幕"
+                                    )
+                                    return subtitles
+            except Exception as e:
+                self.logger.warning(f"dm/view 接口获取字幕失败: {e}")
+
+        # 方法2: 使用 bilibili-api 库的 get_subtitle 方法（备用）
+        try:
+            v = video.Video(bvid=bvid, credential=self.credential)
+            subtitle_info = await v.get_subtitle(cid=cid)
+            if subtitle_info and "subtitles" in subtitle_info:
+                subtitles = subtitle_info.get("subtitles", [])
+                if subtitles:
+                    self.logger.info(
+                        f"通过 bilibili-api 获取到 {len(subtitles)} 个字幕"
+                    )
+                    return subtitles
+        except ResponseCodeException as e:
+            error_type = self._classify_api_error(e)
+            self.last_error_type = error_type
+            if error_type == SubtitleErrorType.COOKIE_EXPIRED:
+                self.last_error = (
+                    f"B站Cookie已失效(错误码:{e.code})，请重新获取登录凭证"
+                )
+            elif error_type == SubtitleErrorType.CREDENTIAL_ERROR:
+                self.last_error = (
+                    f"权限不足，无法获取视频 {bvid} 的字幕（可能需要登录或大会员）"
+                )
+            else:
+                self.last_error = f"获取字幕信息失败(错误码:{e.code}): {e.msg}"
+            self.logger.warning(self.last_error)
+        except Exception as e:
+            self.logger.warning(f"bilibili-api 获取字幕失败: {e}")
+
+        return subtitles
+
     async def fetch_subtitle(self, video_url: str) -> Optional[str]:
         """
         获取视频字幕文本
@@ -210,38 +292,12 @@ class SubtitleFetcher:
                 return None
 
             cid = video_info["cid"]
-            self.logger.info(f"获取到视频cid: {cid}")
+            aid = video_info.get("aid")
+            self.logger.info(f"获取到视频cid: {cid}, aid: {aid}")
 
-            # 3. 传入cid参数获取字幕
-            try:
-                subtitle_info = await v.get_subtitle(cid=cid)
-            except ResponseCodeException as e:
-                error_type = self._classify_api_error(e)
-                self.last_error_type = error_type
+            # 3. 获取字幕列表（优先使用 dm/view 接口，因为 player/v2 接口有时返回空）
+            subtitles = await self._fetch_subtitle_list(bvid, cid, aid)
 
-                if error_type == SubtitleErrorType.COOKIE_EXPIRED:
-                    self.last_error = (
-                        f"B站Cookie已失效(错误码:{e.code})，请重新获取登录凭证"
-                    )
-                elif error_type == SubtitleErrorType.CREDENTIAL_ERROR:
-                    self.last_error = (
-                        f"权限不足，无法获取视频 {bvid} 的字幕（可能需要登录或大会员）"
-                    )
-                else:
-                    self.last_error = f"获取字幕信息失败(错误码:{e.code}): {e.msg}"
-
-                self.logger.error(self.last_error)
-                return None
-
-            if not subtitle_info or "subtitles" not in subtitle_info:
-                self.last_error = (
-                    f"视频 {bvid} 没有可用的字幕（UP主未开启字幕或视频无语音）"
-                )
-                self.last_error_type = SubtitleErrorType.NO_SUBTITLE
-                self.logger.warning(self.last_error)
-                return None
-
-            subtitles = subtitle_info["subtitles"]
             if not subtitles:
                 self.last_error = (
                     f"视频 {bvid} 字幕列表为空（UP主未开启AI字幕或视频无语音内容）"

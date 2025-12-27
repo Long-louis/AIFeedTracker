@@ -706,6 +706,116 @@ class MonitorService:
         )
 
     @staticmethod
+    def _parse_orig_dynamic(item: Dict[str, Any]) -> Optional[str]:
+        """解析转发动态中的原动态内容
+        
+        转发动态的结构：item["orig"] 包含被转发的原动态
+        """
+        orig = item.get("orig")
+        if not orig or not isinstance(orig, dict):
+            return None
+        
+        result_parts = []
+        
+        # 获取原动态作者
+        orig_modules = orig.get("modules", {})
+        if orig_modules:
+            author = orig_modules.get("module_author", {})
+            if author and isinstance(author, dict):
+                name = author.get("name")
+                if name:
+                    result_parts.append(f"**@{name}**")
+        
+        # 获取原动态的动态ID用于生成链接
+        orig_id = orig.get("id_str") or orig.get("id")
+        
+        # 解析原动态内容
+        orig_dynamic = orig_modules.get("module_dynamic", {})
+        if orig_dynamic and isinstance(orig_dynamic, dict):
+            # 尝试从 desc 获取文本
+            desc = orig_dynamic.get("desc")
+            if desc and isinstance(desc, dict):
+                text = desc.get("text")
+                if text and isinstance(text, str):
+                    result_parts.append(text.strip())
+            
+            # 尝试从 major 获取内容（视频/文章等）
+            major = orig_dynamic.get("major")
+            if major and isinstance(major, dict):
+                major_type = major.get("type", "")
+                
+                # 视频
+                if major_type in ("MAJOR_TYPE_ARCHIVE", "archive"):
+                    archive = major.get("archive", {})
+                    if archive:
+                        title = archive.get("title")
+                        if title:
+                            result_parts.append(f"📺 **{title}**")
+                        bvid = archive.get("bvid")
+                        if bvid:
+                            video_url = f"https://www.bilibili.com/video/{bvid}"
+                            result_parts.append(f"[查看视频]({video_url})")
+                
+                # 文章
+                elif major_type in ("MAJOR_TYPE_ARTICLE", "article"):
+                    article = major.get("article", {})
+                    if article:
+                        title = article.get("title")
+                        if title:
+                            result_parts.append(f"📰 **{title}**")
+                        jump_url = article.get("jump_url")
+                        if jump_url:
+                            if jump_url.startswith("//"):
+                                jump_url = "https:" + jump_url
+                            result_parts.append(f"[查看文章]({jump_url})")
+                
+                # OPUS 图文
+                elif major_type == "MAJOR_TYPE_OPUS":
+                    opus = major.get("opus", {})
+                    if opus:
+                        title = opus.get("title")
+                        if title:
+                            result_parts.append(f"**{title}**")
+                        summary = opus.get("summary", {})
+                        if summary:
+                            text = summary.get("text")
+                            if text:
+                                result_parts.append(text.strip())
+                
+                # 直播
+                elif major_type in ("MAJOR_TYPE_LIVE_RCMD", "MAJOR_TYPE_LIVE"):
+                    live = major.get("live_rcmd") or major.get("live", {})
+                    if live:
+                        title = live.get("title") or live.get("room_title")
+                        if title:
+                            result_parts.append(f"📺 **直播：{title}**")
+                        jump_url = live.get("jump_url") or live.get("link")
+                        if jump_url:
+                            result_parts.append(f"[进入直播间]({jump_url})")
+                
+                # 通用卡片类型兜底
+                if not any("查看" in p or "进入" in p for p in result_parts):
+                    for key in ("common", "ugc_season", "music", "pgc"):
+                        card = major.get(key)
+                        if isinstance(card, dict):
+                            title = card.get("title")
+                            if title:
+                                result_parts.append(f"**{title}**")
+                            jump_url = card.get("jump_url") or card.get("url")
+                            if jump_url:
+                                if jump_url.startswith("//"):
+                                    jump_url = "https:" + jump_url
+                                result_parts.append(f"[查看详情]({jump_url})")
+                            break
+        
+        # 添加原动态链接
+        if orig_id:
+            orig_url = f"https://t.bilibili.com/{orig_id}"
+            result_parts.append(f"[查看原动态]({orig_url})")
+        
+        return "\n".join(result_parts) if result_parts else None
+
+    @staticmethod
     def extract_video_info(item: Dict[str, Any]) -> Optional[Tuple[str, str]]:
         """从动态项提取视频信息"""
         dynamic = item.get("modules", {}).get("module_dynamic", {})
@@ -1053,19 +1163,32 @@ class MonitorService:
     ) -> None:
         """处理文字动态"""
         text = self.parse_text_from_item(item)
-        if not text:
+        is_charge = self.is_charge_dynamic(item)
+        
+        # 解析转发的原动态内容
+        orig_content = self._parse_orig_dynamic(item)
+
+        # 充电动态且无内容时，简化提示（避免 Cookie 过期导致的"无文本内容"）
+        if not text and is_charge:
+            text = "🔒 充电专属内容，请前往 B 站查看"
+        elif not text:
             text = "(无文本内容)"
 
         charge_prefix = ""
-        if self.is_charge_dynamic(item):
+        if is_charge:
             charge_prefix = "**【充电】**\n\n"
 
         pub_time = self.get_publish_time(item)
 
         # 构建markdown内容
         markdown_content = f"{charge_prefix}{text}"
+        
+        # 添加转发的原动态内容
+        if orig_content:
+            markdown_content += f"\n\n---\n\n**转发内容：**\n{orig_content}"
+        
         if pub_time:
-            markdown_content = f"{charge_prefix}{text}\n\n{pub_time}"
+            markdown_content += f"\n\n{pub_time}"
 
         markdown_content += f"\n\n[查看原动态]({url})"
 

@@ -202,6 +202,9 @@ class MonitorService:
         17: CommentResourceType.DYNAMIC,
     }
 
+    # 凭证刷新间隔（秒）：每6小时检查一次
+    _CREDENTIAL_REFRESH_INTERVAL = 6 * 3600
+
     def __init__(self, feishu_bot=None, summarizer=None, cookie: Optional[str] = None):
         """
         初始化监控服务
@@ -223,6 +226,9 @@ class MonitorService:
 
         # 创建统一凭证（依赖 config.py 中的环境变量）
         self.credential = build_bilibili_credential()
+        
+        # 上次凭证刷新时间
+        self._last_credential_refresh: float = 0
 
         # 初始化评论获取服务
         self.comment_fetcher = None
@@ -238,6 +244,59 @@ class MonitorService:
         except Exception as e:
             self.logger.warning(f"评论获取服务初始化失败: {e}")
             self.comment_fetcher = None
+
+    async def _check_and_refresh_credential(self) -> bool:
+        """检查并刷新凭证（如果需要）
+        
+        Returns:
+            bool: 凭证是否有效
+        """
+        if not self.credential:
+            return False
+        
+        current_time = time.time()
+        
+        # 如果距离上次刷新不足间隔时间，跳过检查
+        if current_time - self._last_credential_refresh < self._CREDENTIAL_REFRESH_INTERVAL:
+            return True
+        
+        try:
+            # 先检查凭证是否有效
+            is_valid = await self.credential.check_valid()
+            if not is_valid:
+                self.logger.warning("凭证已失效，尝试刷新...")
+                need_refresh = True
+            else:
+                # 检查是否需要刷新（即将过期）
+                need_refresh = await self.credential.check_refresh()
+            
+            if need_refresh:
+                self.logger.info("开始刷新凭证...")
+                await self.credential.refresh()
+                self.logger.info("凭证刷新成功")
+                
+                # 发送通知
+                if self.feishu_bot:
+                    await self.feishu_bot.send_system_notification(
+                        self.feishu_bot.LEVEL_INFO,
+                        "B站凭证已自动刷新",
+                        "Cookie 已自动刷新，服务正常运行中。",
+                    )
+            
+            self._last_credential_refresh = current_time
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"凭证刷新失败: {e}")
+            
+            # 发送告警
+            if self.feishu_bot:
+                await self.feishu_bot.send_system_notification(
+                    self.feishu_bot.LEVEL_ERROR,
+                    "B站凭证刷新失败",
+                    f"自动刷新 Cookie 失败，可能需要手动更新。\n\n**错误信息:** {e}\n\n请参考 docs/BILIBILI_SETUP.md 重新获取凭证。",
+                )
+            return False
 
     @staticmethod
     def get_publish_time(item: Dict[str, Any]) -> str:
@@ -1249,16 +1308,8 @@ class MonitorService:
             creators: 创作者列表
             once: 是否只运行一次
         """
-        # 若凭证支持自动刷新，则调用库内检查/刷新
-        if self.credential:
-            try:
-                need_refresh = await self.credential.check_refresh()
-                if need_refresh:
-                    self.logger.info("检测到凭证需要刷新，开始刷新...")
-                    await self.credential.refresh()
-                    self.logger.info("凭证刷新完成")
-            except Exception as e:
-                self.logger.warning(f"凭证刷新检查失败: {e}")
+        # 启动时检查并刷新凭证
+        await self._check_and_refresh_credential()
 
         # A 策略：启动时对齐 last_seen 到当前最新（不补发）。
         # 若显式开启 backfill_on_start（例如 --reset），则跳过对齐，允许补发。
@@ -1388,6 +1439,20 @@ class MonitorService:
                 coalesce=True,
             )
             self.logger.info("配置文件热重载监控已启动（每10秒检查一次）")
+
+            # 添加凭证自动刷新任务（每6小时检查一次）
+            async def _check_credential() -> None:
+                await self._check_and_refresh_credential()
+
+            scheduler.add_job(
+                _check_credential,
+                trigger="interval",
+                seconds=self._CREDENTIAL_REFRESH_INTERVAL,
+                id="credential_refresh",
+                max_instances=1,
+                coalesce=True,
+            )
+            self.logger.info(f"凭证自动刷新已启动（每{self._CREDENTIAL_REFRESH_INTERVAL // 3600}小时检查一次）")
 
             # 设置初始创作者任务
             _setup_creator_jobs(scheduler, creators)

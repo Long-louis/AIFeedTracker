@@ -248,6 +248,8 @@ class MonitorService:
     async def _check_and_refresh_credential(self) -> bool:
         """检查并刷新凭证（如果需要）
         
+        静默刷新，不发送通知。只在日志中记录。
+        
         Returns:
             bool: 凭证是否有效
         """
@@ -261,41 +263,20 @@ class MonitorService:
             return True
         
         try:
-            # 先检查凭证是否有效
-            is_valid = await self.credential.check_valid()
-            if not is_valid:
-                self.logger.warning("凭证已失效，尝试刷新...")
-                need_refresh = True
-            else:
-                # 检查是否需要刷新（即将过期）
-                need_refresh = await self.credential.check_refresh()
+            # 检查是否需要刷新（即将过期）
+            need_refresh = await self.credential.check_refresh()
             
             if need_refresh:
-                self.logger.info("开始刷新凭证...")
+                self.logger.info("凭证即将过期，开始刷新...")
                 await self.credential.refresh()
                 self.logger.info("凭证刷新成功")
-                
-                # 发送通知
-                if self.feishu_bot:
-                    await self.feishu_bot.send_system_notification(
-                        self.feishu_bot.LEVEL_INFO,
-                        "B站凭证已自动刷新",
-                        "Cookie 已自动刷新，服务正常运行中。",
-                    )
             
             self._last_credential_refresh = current_time
             return True
             
         except Exception as e:
-            self.logger.error(f"凭证刷新失败: {e}")
-            
-            # 发送告警
-            if self.feishu_bot:
-                await self.feishu_bot.send_system_notification(
-                    self.feishu_bot.LEVEL_ERROR,
-                    "B站凭证刷新失败",
-                    f"自动刷新 Cookie 失败，可能需要手动更新。\n\n**错误信息:** {e}\n\n请参考 docs/BILIBILI_SETUP.md 重新获取凭证。",
-                )
+            self.logger.warning(f"凭证刷新失败: {e}")
+            # 不发送通知，等获取动态失败时自然会知道
             return False
 
     @staticmethod

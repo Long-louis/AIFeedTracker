@@ -226,7 +226,7 @@ class MonitorService:
 
         # 创建统一凭证（依赖 config.py 中的环境变量）
         self.credential = build_bilibili_credential()
-        
+
         # 上次凭证刷新时间
         self._last_credential_refresh: float = 0
 
@@ -247,33 +247,36 @@ class MonitorService:
 
     async def _check_and_refresh_credential(self) -> bool:
         """检查并刷新凭证（如果需要）
-        
+
         静默刷新，不发送通知。只在日志中记录。
-        
+
         Returns:
             bool: 凭证是否有效
         """
         if not self.credential:
             return False
-        
+
         current_time = time.time()
-        
+
         # 如果距离上次刷新不足间隔时间，跳过检查
-        if current_time - self._last_credential_refresh < self._CREDENTIAL_REFRESH_INTERVAL:
+        if (
+            current_time - self._last_credential_refresh
+            < self._CREDENTIAL_REFRESH_INTERVAL
+        ):
             return True
-        
+
         try:
             # 检查是否需要刷新（即将过期）
             need_refresh = await self.credential.check_refresh()
-            
+
             if need_refresh:
                 self.logger.info("凭证即将过期，开始刷新...")
                 await self.credential.refresh()
                 self.logger.info("凭证刷新成功")
-            
+
             self._last_credential_refresh = current_time
             return True
-            
+
         except Exception as e:
             self.logger.warning(f"凭证刷新失败: {e}")
             # 不发送通知，等获取动态失败时自然会知道
@@ -748,15 +751,15 @@ class MonitorService:
     @staticmethod
     def _parse_orig_dynamic(item: Dict[str, Any]) -> Optional[str]:
         """解析转发动态中的原动态内容
-        
+
         转发动态的结构：item["orig"] 包含被转发的原动态
         """
         orig = item.get("orig")
         if not orig or not isinstance(orig, dict):
             return None
-        
+
         result_parts = []
-        
+
         # 获取原动态作者
         orig_modules = orig.get("modules", {})
         if orig_modules:
@@ -765,10 +768,10 @@ class MonitorService:
                 name = author.get("name")
                 if name:
                     result_parts.append(f"**@{name}**")
-        
+
         # 获取原动态的动态ID用于生成链接
         orig_id = orig.get("id_str") or orig.get("id")
-        
+
         # 解析原动态内容
         orig_dynamic = orig_modules.get("module_dynamic", {})
         if orig_dynamic and isinstance(orig_dynamic, dict):
@@ -778,12 +781,12 @@ class MonitorService:
                 text = desc.get("text")
                 if text and isinstance(text, str):
                     result_parts.append(text.strip())
-            
+
             # 尝试从 major 获取内容（视频/文章等）
             major = orig_dynamic.get("major")
             if major and isinstance(major, dict):
                 major_type = major.get("type", "")
-                
+
                 # 视频
                 if major_type in ("MAJOR_TYPE_ARCHIVE", "archive"):
                     archive = major.get("archive", {})
@@ -795,7 +798,7 @@ class MonitorService:
                         if bvid:
                             video_url = f"https://www.bilibili.com/video/{bvid}"
                             result_parts.append(f"[查看视频]({video_url})")
-                
+
                 # 文章
                 elif major_type in ("MAJOR_TYPE_ARTICLE", "article"):
                     article = major.get("article", {})
@@ -808,7 +811,7 @@ class MonitorService:
                             if jump_url.startswith("//"):
                                 jump_url = "https:" + jump_url
                             result_parts.append(f"[查看文章]({jump_url})")
-                
+
                 # OPUS 图文
                 elif major_type == "MAJOR_TYPE_OPUS":
                     opus = major.get("opus", {})
@@ -821,7 +824,7 @@ class MonitorService:
                             text = summary.get("text")
                             if text:
                                 result_parts.append(text.strip())
-                
+
                 # 直播
                 elif major_type in ("MAJOR_TYPE_LIVE_RCMD", "MAJOR_TYPE_LIVE"):
                     live = major.get("live_rcmd") or major.get("live", {})
@@ -832,7 +835,7 @@ class MonitorService:
                         jump_url = live.get("jump_url") or live.get("link")
                         if jump_url:
                             result_parts.append(f"[进入直播间]({jump_url})")
-                
+
                 # 通用卡片类型兜底
                 if not any("查看" in p or "进入" in p for p in result_parts):
                     for key in ("common", "ugc_season", "music", "pgc"):
@@ -847,12 +850,12 @@ class MonitorService:
                                     jump_url = "https:" + jump_url
                                 result_parts.append(f"[查看详情]({jump_url})")
                             break
-        
+
         # 添加原动态链接
         if orig_id:
             orig_url = f"https://t.bilibili.com/{orig_id}"
             result_parts.append(f"[查看原动态]({orig_url})")
-        
+
         return "\n".join(result_parts) if result_parts else None
 
     @staticmethod
@@ -1204,7 +1207,7 @@ class MonitorService:
         """处理文字动态"""
         text = self.parse_text_from_item(item)
         is_charge = self.is_charge_dynamic(item)
-        
+
         # 解析转发的原动态内容
         orig_content = self._parse_orig_dynamic(item)
 
@@ -1222,11 +1225,11 @@ class MonitorService:
 
         # 构建markdown内容
         markdown_content = f"{charge_prefix}{text}"
-        
+
         # 添加转发的原动态内容
         if orig_content:
             markdown_content += f"\n\n---\n\n**转发内容：**\n{orig_content}"
-        
+
         if pub_time:
             markdown_content += f"\n\n{pub_time}"
 
@@ -1433,7 +1436,9 @@ class MonitorService:
                 max_instances=1,
                 coalesce=True,
             )
-            self.logger.info(f"凭证自动刷新已启动（每{self._CREDENTIAL_REFRESH_INTERVAL // 3600}小时检查一次）")
+            self.logger.info(
+                f"凭证自动刷新已启动（每{self._CREDENTIAL_REFRESH_INTERVAL // 3600}小时检查一次）"
+            )
 
             # 设置初始创作者任务
             _setup_creator_jobs(scheduler, creators)

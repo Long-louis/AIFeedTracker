@@ -570,6 +570,19 @@ class MonitorService:
         依据 deepwiki 对 bilibili-api-python 的说明：优先检查动态结构中的 badge 文本与 onlyfans 字段。
         """
 
+        # 0) 优先检查 basic 层级的充电/粉丝专属标记（最直接）
+        basic = item.get("basic", {})
+        if isinstance(basic, dict):
+            for key, val in basic.items():
+                key_l = str(key).lower()
+                if any(
+                    x in key_l for x in ("onlyfans", "charge", "upower", "fans_only")
+                ):
+                    if val is True:
+                        return True
+                    if isinstance(val, str) and val:
+                        return True
+
         modules = item.get("modules", {})
         if not isinstance(modules, dict):
             return False
@@ -600,7 +613,12 @@ class MonitorService:
 
         # 2) 扫描 major/opus/archive 等的 badge.text 是否含“充电”
         badge_texts = MonitorService._collect_badge_texts(dynamic)
-        return any(("充电" in t) for t in badge_texts)
+        if any(("充电" in t) for t in badge_texts):
+            return True
+
+        # 3) 兜底：扫描整个 item 的 badge
+        all_badges = MonitorService._collect_badge_texts(item)
+        return any(("充电" in t) for t in all_badges)
 
     def _get_comment_thread_info(
         self, item: Dict[str, Any]

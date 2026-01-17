@@ -5,6 +5,7 @@
 统一管理项目的配置信息，包括环境变量加载和常量定义
 """
 
+import json
 import os
 from pathlib import Path
 from typing import Optional
@@ -126,6 +127,43 @@ def build_bilibili_credential():
         dedeuserid=cfg.get("DedeUserID"),
         ac_time_value=cfg.get("ac_time_value"),
     )
+
+
+def apply_bilibili_config(values: dict) -> None:
+    """将新的B站凭证写入进程环境与运行时配置。"""
+    allowed_keys = {
+        "SESSDATA",
+        "bili_jct",
+        "buvid3",
+        "buvid4",
+        "DedeUserID",
+        "DedeUserID__ckMd5",
+        "ac_time_value",
+        "refresh_token",
+    }
+    for key, value in values.items():
+        if key not in allowed_keys:
+            continue
+        if not value:
+            continue
+        os.environ[str(key)] = str(value)
+        BILIBILI_CONFIG[str(key)] = str(value)
+
+
+def _load_bilibili_auth_data(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        raise ValueError("bilibili_auth.json 必须是 JSON object")
+    return data
+
+
+_AUTH_DATA_PATH = project_root / "data" / "bilibili_auth.json"
+_AUTH_DATA = _load_bilibili_auth_data(_AUTH_DATA_PATH)
+if _AUTH_DATA:
+    apply_bilibili_config(_AUTH_DATA)
 
 
 def get_config_status() -> dict:

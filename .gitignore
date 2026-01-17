@@ -70,3 +70,4 @@ Thumbs.db
 backup/
 *.bak
 *.backup
+data/bilibili_auth.json

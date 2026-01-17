@@ -23,6 +23,7 @@ from bilibili_api.comment import CommentResourceType
 from config import build_bilibili_credential
 
 from .comment_fetcher import CommentFetcher
+from .bilibili_auth import BilibiliAuth
 
 
 class ConfigFileWatcher:
@@ -103,6 +104,9 @@ class Creator:
     check_interval: int = 300  # 默认5分钟
     enable_comments: bool = False  # 是否启用评论获取
     comment_rules: List[Dict[str, Any]] = None  # 评论筛选规则列表（支持多规则）
+    comment_length_min: int = 10  # 博主评论长度阈值（严格大于才推送）
+    comment_poll_interval_seconds: int = 600  # 视频/动态评论轮询间隔（秒）
+    comment_poll_window_seconds: int = 24 * 3600  # 评论轮询窗口（秒）
     feishu_channel: Optional[str] = (
         None  # 可选：指定此创作者消息推送通道（例如 webhook:group1）
     )
@@ -182,6 +186,25 @@ class JsonState:
             for k in list(pinned.keys())[:extra]:
                 pinned.pop(k, None)
 
+    def get_comment_poll_state(
+        self, uid: int
+    ) -> Tuple[float, Dict[str, Dict[str, Any]]]:
+        entry = self.state.get(str(uid), {})
+        last_poll_ts = entry.get("comment_poll_last_ts")
+        if not isinstance(last_poll_ts, (int, float)):
+            last_poll_ts = 0.0
+        video_map = entry.get("comment_poll_videos")
+        if not isinstance(video_map, dict):
+            video_map = {}
+        return float(last_poll_ts), video_map
+
+    def set_comment_poll_state(
+        self, uid: int, last_poll_ts: float, video_map: Dict[str, Dict[str, Any]]
+    ) -> None:
+        entry = self.state.setdefault(str(uid), {})
+        entry["comment_poll_last_ts"] = float(last_poll_ts)
+        entry["comment_poll_videos"] = video_map
+
 
 class MonitorService:
     """B站动态监控服务"""
@@ -204,6 +227,9 @@ class MonitorService:
 
     # 凭证刷新间隔（秒）：每6小时检查一次
     _CREDENTIAL_REFRESH_INTERVAL = 6 * 3600
+
+    # 二维码提醒间隔（秒）：避免重复刷屏
+    _QR_NOTIFY_INTERVAL = 10 * 60
 
     def __init__(self, feishu_bot=None, summarizer=None, cookie: Optional[str] = None):
         """
@@ -234,6 +260,9 @@ class MonitorService:
         self.comment_fetcher = None
         self._init_comment_fetcher()
 
+        # B站认证工具（二维码登录）
+        self.auth = BilibiliAuth()
+
     def _init_comment_fetcher(self) -> None:
         """初始化评论获取服务"""
         try:
@@ -254,6 +283,7 @@ class MonitorService:
             bool: 凭证是否有效
         """
         if not self.credential:
+            await self._notify_qr_login_needed("未配置或已失效")
             return False
 
         current_time = time.time()
@@ -279,8 +309,72 @@ class MonitorService:
 
         except Exception as e:
             self.logger.warning(f"凭证刷新失败: {e}")
+            await self._notify_qr_login_needed("凭证刷新失败")
             # 不发送通知，等获取动态失败时自然会知道
             return False
+
+    def _refresh_runtime_credential(self) -> None:
+        self.credential = build_bilibili_credential()
+        if not self.credential:
+            return
+        if self.comment_fetcher:
+            self.comment_fetcher.credential = self.credential
+        if self.summarizer and hasattr(self.summarizer, "subtitle_fetcher"):
+            self.summarizer.subtitle_fetcher.credential = self.credential
+
+    async def _notify_qr_login_needed(self, reason: str) -> None:
+        if not self.feishu_bot:
+            return
+
+        now_ts = time.time()
+        last_notify = self.auth.get_qr_last_notify_ts()
+        if now_ts - last_notify < self._QR_NOTIFY_INTERVAL:
+            return
+
+        if not self.auth.has_active_qr_login():
+            qr_path = await self.auth.start_qr_login()
+        else:
+            qr_path = str(self.auth.QR_CODE_PATH)
+
+        image_key = await self.feishu_bot.upload_local_image(qr_path)
+
+        content = "检测到B站登录已失效，需要扫码重新登录。"
+        if reason:
+            content += f"\n\n**原因**: {reason}"
+        if image_key:
+            content += f"\n\n![B站登录二维码]({image_key})"
+        else:
+            content += f"\n\n二维码文件: {qr_path}"
+            content += "\n\n⚠️ 未配置飞书应用凭证，无法上传图片。"
+
+        await self.feishu_bot.send_system_notification(
+            self.feishu_bot.LEVEL_WARNING,
+            "B站登录过期，需要扫码",
+            content,
+        )
+        self.auth.set_qr_last_notify_ts(now_ts)
+
+    async def _poll_qr_login_status(self) -> None:
+        if not self.auth.has_active_qr_login():
+            return
+
+        state, values = await self.auth.poll_qr_login()
+        if state == "pending":
+            return
+
+        if state == "timeout":
+            await self._notify_qr_login_needed("二维码已过期，请重新扫码")
+            return
+
+        if state == "done" and values:
+            self.auth.set_credential_values(values)
+            self._refresh_runtime_credential()
+            if self.feishu_bot:
+                await self.feishu_bot.send_system_notification(
+                    self.feishu_bot.LEVEL_INFO,
+                    "B站登录更新成功",
+                    "已完成扫码登录，凭证已自动更新。",
+                )
 
     @staticmethod
     def get_publish_time(item: Dict[str, Any]) -> str:
@@ -726,6 +820,189 @@ class MonitorService:
         if changed:
             self.state.save()
 
+    @staticmethod
+    def _format_comment_poll_key(oid: int, type_: CommentResourceType) -> str:
+        if isinstance(type_, CommentResourceType):
+            type_value = type_.value
+        else:
+            type_value = int(type_)
+        return f"{oid}:{int(type_value)}"
+
+    @staticmethod
+    def _safe_comment_message(comm: Dict[str, Any]) -> str:
+        content_obj = comm.get("content", {})
+        if not isinstance(content_obj, dict):
+            return ""
+        message = content_obj.get("message", "")
+        if not isinstance(message, str):
+            return ""
+        return message
+
+    @staticmethod
+    def _get_comment_author_uid(comm: Dict[str, Any]) -> Optional[int]:
+        member = comm.get("member", {})
+        if not isinstance(member, dict):
+            return None
+        mid = member.get("mid")
+        if isinstance(mid, int):
+            return mid
+        if isinstance(mid, str) and mid.isdigit():
+            return int(mid)
+        return None
+
+    def _is_creator_comment(
+        self, comm: Dict[str, Any], creator_uid: int
+    ) -> bool:
+        mid = self._get_comment_author_uid(comm)
+        if mid is None:
+            return False
+        return mid == int(creator_uid)
+
+    async def _poll_creator_comments(
+        self, creator: Creator, items: List[Dict[str, Any]]
+    ) -> None:
+        """轮询最新动态/视频的评论区，推送博主新评论。"""
+
+        if not creator.enable_comments:
+            return
+
+        if not self.comment_fetcher:
+            return
+
+        now_ts = time.time()
+        last_poll_ts, video_map = self.state.get_comment_poll_state(creator.uid)
+        if now_ts - last_poll_ts < creator.comment_poll_interval_seconds:
+            return
+
+        earliest_allowed_timestamp = now_ts - creator.comment_poll_window_seconds
+
+        candidates: List[Dict[str, Any]] = []
+        for it in items:
+            ts = self.get_publish_timestamp(it)
+            if ts and ts >= earliest_allowed_timestamp:
+                candidates.append(it)
+                if len(candidates) >= 5:
+                    break
+
+        if not candidates:
+            self.state.set_comment_poll_state(creator.uid, now_ts, video_map)
+            self.state.save()
+            return
+
+        pushed = False
+
+        for it in candidates:
+            dynamic_id = str(it.get("id_str") or it.get("id"))
+            if not dynamic_id:
+                continue
+
+            thread = self._get_comment_thread_info(it)
+            if thread is None:
+                continue
+
+            oid, resource = thread
+            key = self._format_comment_poll_key(oid, resource)
+            entry = video_map.get(key, {})
+            last_seen_rpid = entry.get("last_seen_rpid")
+            if last_seen_rpid is not None:
+                last_seen_rpid = str(last_seen_rpid)
+
+            comments = await self.comment_fetcher.fetch_recent_comments_by_oid(
+                oid=oid,
+                type_=resource,
+                page_index=1,
+            )
+
+            if not comments:
+                continue
+
+            comments.sort(key=lambda c: int(c.get("ctime", 0) or 0))
+
+            new_comments: List[Dict[str, Any]] = []
+            for comm in comments:
+                rpid = comm.get("rpid")
+                if rpid is None:
+                    rpid = comm.get("rpid_str")
+                rpid_str = str(rpid) if rpid is not None else ""
+                if not rpid_str:
+                    continue
+                if last_seen_rpid is not None and rpid_str == last_seen_rpid:
+                    new_comments = []
+                    continue
+                new_comments.append(comm)
+
+            if last_seen_rpid is None:
+                last_rpid = comments[-1].get("rpid")
+                if last_rpid is None:
+                    last_rpid = comments[-1].get("rpid_str")
+                if last_rpid is not None:
+                    entry["last_seen_rpid"] = str(last_rpid)
+                    video_map[key] = entry
+                continue
+
+            if not new_comments:
+                continue
+
+            creator_comments = []
+            for comm in new_comments:
+                if not self._is_creator_comment(comm, creator.uid):
+                    continue
+                message = self._safe_comment_message(comm)
+                if len(message) <= int(creator.comment_length_min):
+                    continue
+                creator_comments.append(comm)
+
+            if not creator_comments:
+                last_rpid = comments[-1].get("rpid")
+                if last_rpid is None:
+                    last_rpid = comments[-1].get("rpid_str")
+                if last_rpid is not None:
+                    entry["last_seen_rpid"] = str(last_rpid)
+                    video_map[key] = entry
+                continue
+
+            title = "（无文本内容）"
+            vinfo = self.extract_video_info(it)
+            if vinfo:
+                _, video_title = vinfo
+                if video_title:
+                    title = video_title
+            else:
+                text = self.parse_text_from_item(it)
+                if text:
+                    title = text.split("\n", 1)[0].strip() or title
+
+            url = self.DYNAMIC_PC_URL.format(dynamic_id=dynamic_id)
+
+            comment_section = "---\n\n### 💬 博主新评论\n\n"
+            comment_section += f"**动态**: {title}\n\n"
+            comment_section += f"🔗 [查看原动态]({url})\n\n"
+            comment_section += "---\n\n"
+
+            for idx, comm in enumerate(creator_comments, 1):
+                comment_text = self.comment_fetcher.format_comment_for_display(comm)
+                comment_section += f"**评论 {idx}:**\n\n{comment_text}\n\n"
+
+            if self.feishu_bot:
+                await self.feishu_bot.send_card_message(
+                    creator.name,
+                    "哔哩哔哩",
+                    comment_section,
+                    channel=creator.feishu_channel,
+                    addition_title="博主新评论",
+                )
+                pushed = True
+
+            last_rpid = comments[-1].get("rpid")
+            if last_rpid is None:
+                last_rpid = comments[-1].get("rpid_str")
+            if last_rpid is not None:
+                entry["last_seen_rpid"] = str(last_rpid)
+                video_map[key] = entry
+
+        self.state.set_comment_poll_state(creator.uid, now_ts, video_map)
+        self.state.save()
+
     async def _push_pinned_comment_update(
         self, creator: Creator, item: Dict[str, Any], pinned_comment: Dict[str, Any]
     ) -> None:
@@ -966,6 +1243,9 @@ class MonitorService:
 
         # 每轮都检查近期动态的置顶评论变化（与是否有新动态无关）
         await self._check_recent_pinned_comments(creator, items)
+
+        # 每轮都轮询近期动态的评论区，推送博主新评论
+        await self._poll_creator_comments(creator, items)
 
         last_seen = self.state.get_last_seen(creator.uid)
         if last_seen is None:
@@ -1312,6 +1592,7 @@ class MonitorService:
         """
         # 启动时检查并刷新凭证
         await self._check_and_refresh_credential()
+        await self._poll_qr_login_status()
 
         # A 策略：启动时对齐 last_seen 到当前最新（不补发）。
         # 若显式开启 backfill_on_start（例如 --reset），则跳过对齐，允许补发。
@@ -1444,7 +1725,8 @@ class MonitorService:
 
             # 添加凭证自动刷新任务（每6小时检查一次）
             async def _check_credential() -> None:
-                await self._check_and_refresh_credential()
+                        await self._check_and_refresh_credential()
+                        await self._poll_qr_login_status()
 
             scheduler.add_job(
                 _check_credential,
@@ -1536,6 +1818,13 @@ class MonitorService:
                     check_interval=int(i.get("check_interval", 300)),
                     enable_comments=bool(i.get("enable_comments", False)),
                     comment_rules=i.get("comment_rules", []),
+                    comment_length_min=int(i.get("comment_length_min", 10)),
+                    comment_poll_interval_seconds=int(
+                        i.get("comment_poll_interval_seconds", 600)
+                    ),
+                    comment_poll_window_seconds=int(
+                        i.get("comment_poll_window_seconds", 24 * 3600)
+                    ),
                     feishu_channel=str(channel).strip() if channel else None,
                     crons=crons,
                     jitter_seconds=jitter_seconds,

@@ -407,6 +407,43 @@ class CommentFetcher:
             self.logger.warning(f"未知的筛选模式: {mode}，使用默认的'all'模式")
             return keyword_match and user_match and likes_match
 
+    @staticmethod
+    def _flatten_comment_tree(
+        comments: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """展开评论树（包含子回复），并做去重。"""
+        if not comments:
+            return []
+
+        flattened: List[Dict[str, Any]] = []
+        seen = set()
+        stack = list(comments)
+
+        while stack:
+            comm = stack.pop()
+            if not isinstance(comm, dict):
+                continue
+
+            rpid = comm.get("rpid")
+            if rpid is None:
+                rpid = comm.get("rpid_str")
+            rpid_str = str(rpid) if rpid is not None else ""
+            if rpid_str:
+                if rpid_str in seen:
+                    replies = comm.get("replies")
+                    if isinstance(replies, list) and replies:
+                        stack.extend(replies)
+                    continue
+                seen.add(rpid_str)
+
+            flattened.append(comm)
+
+            replies = comm.get("replies")
+            if isinstance(replies, list) and replies:
+                stack.extend(replies)
+
+        return flattened
+
     def format_comment_for_display(self, comm: Dict[str, Any]) -> str:
         """
         格式化评论为可读文本（含图片）
@@ -459,6 +496,71 @@ class CommentFetcher:
         except Exception as e:
             self.logger.error(f"格式化评论失败: {e}")
             return "评论格式化失败"
+
+    async def fetch_recent_comments_by_oid(
+        self,
+        oid: int,
+        type_: CommentResourceType,
+        page_index: int = 1,
+    ) -> List[Dict[str, Any]]:
+        """按时间排序拉取评论（支持动态/视频等资源）。"""
+        comment_data = await comment.get_comments(
+            oid=oid,
+            type_=type_,
+            page_index=page_index,
+            order=OrderType.TIME,
+            credential=self.credential,
+        )
+
+        payload: Any = comment_data
+        if isinstance(comment_data, dict) and isinstance(
+            comment_data.get("data"), dict
+        ):
+            payload = comment_data["data"]
+
+        if not isinstance(payload, dict):
+            return []
+
+        comments: List[Dict[str, Any]] = []
+
+        top = payload.get("top")
+        if isinstance(top, dict):
+            upper = top.get("upper")
+            if isinstance(upper, dict):
+                comments.append(upper)
+            admin = top.get("admin")
+            if isinstance(admin, dict):
+                comments.append(admin)
+            top_reply = top.get("top")
+            if isinstance(top_reply, dict):
+                comments.append(top_reply)
+
+        upper_wrap = payload.get("upper")
+        if isinstance(upper_wrap, dict):
+            top2 = upper_wrap.get("top")
+            if isinstance(top2, dict):
+                comments.append(top2)
+
+        replies = payload.get("replies")
+        if isinstance(replies, list):
+            comments.extend(replies)
+
+        return self._flatten_comment_tree(comments)
+
+    async def fetch_recent_video_comments(
+        self, bvid: str, page_index: int = 1
+    ) -> List[Dict[str, Any]]:
+        """按时间排序拉取视频评论（包含子回复）。"""
+        v = video.Video(bvid=bvid, credential=self.credential)
+        video_info = await v.get_info()
+        aid = video_info.get("aid")
+        if not aid:
+            return []
+        return await self.fetch_recent_comments_by_oid(
+            oid=int(aid),
+            type_=CommentResourceType.VIDEO,
+            page_index=page_index,
+        )
 
     async def fetch_upper_pinned_comment(
         self, oid: int, type_: CommentResourceType

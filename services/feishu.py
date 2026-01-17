@@ -203,28 +203,39 @@ class FeishuBot:
                 .build()
             )
 
-            async with aiohttp.ClientSession() as session:
-                # B站图片需要 Referer 头才能访问
-                headers = {
-                    "Referer": "https://www.bilibili.com/",
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                }
-                async with session.get(image_url, headers=headers) as response:
-                    if response.status != 200:
-                        self.logger.warning(
-                            f"下载图片失败: {image_url}, status: {response.status}"
-                        )
-                        return None
-                    image_data = await response.read()
+            local_path = ""
+            cleanup_temp = False
 
-            import tempfile
+            if image_url.startswith("file://"):
+                local_path = image_url[len("file://") :]
+            elif os.path.isfile(image_url):
+                local_path = image_url
+            else:
+                async with aiohttp.ClientSession() as session:
+                    # B站图片需要 Referer 头才能访问
+                    headers = {
+                        "Referer": "https://www.bilibili.com/",
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    }
+                    async with session.get(image_url, headers=headers) as response:
+                        if response.status != 200:
+                            self.logger.warning(
+                                f"下载图片失败: {image_url}, status: {response.status}"
+                            )
+                            return None
+                        image_data = await response.read()
 
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as temp_file:
-                temp_file.write(image_data)
-                temp_file_path = temp_file.name
+                import tempfile
+
+                with tempfile.NamedTemporaryFile(
+                    delete=False, suffix=".jpg"
+                ) as temp_file:
+                    temp_file.write(image_data)
+                    local_path = temp_file.name
+                    cleanup_temp = True
 
             try:
-                with open(temp_file_path, "rb") as image_file:
+                with open(local_path, "rb") as image_file:
                     request = (
                         sdk["CreateImageRequest"]
                         .builder()
@@ -248,14 +259,18 @@ class FeishuBot:
                         self.logger.error(f"图片上传失败: {response.msg}")
                         return None
             finally:
-                try:
-                    os.unlink(temp_file_path)
-                except Exception:
-                    pass
+                if cleanup_temp and local_path:
+                    os.unlink(local_path)
 
         except Exception as e:
             self.logger.error(f"上传图片到飞书异常: {e}")
             return None
+
+    async def upload_local_image(self, image_path: str) -> Optional[str]:
+        """上传本地图片到飞书，返回 image_key 或 None。"""
+        if not self._image_upload_app_cfg:
+            return None
+        return await self.upload_image_to_feishu(image_path, self._image_upload_app_cfg)
 
     async def convert_images_in_markdown(
         self, markdown_content: str, app_cfg: Dict[str, str]

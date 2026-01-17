@@ -314,9 +314,22 @@ class MonitorService:
             return False
 
     def _refresh_runtime_credential(self) -> None:
+        """从 bilibili_auth.json 重新加载凭证并应用到运行时"""
+        # 重新加载认证数据并应用到环境变量和 BILIBILI_CONFIG
+        from config import apply_bilibili_config
+        auth_data = self.auth._load_auth_data()
+        if auth_data:
+            apply_bilibili_config(auth_data)
+        
+        # 重建 Credential 对象
         self.credential = build_bilibili_credential()
         if not self.credential:
+            self.logger.warning("重新加载凭证后仍未能构建有效 Credential")
             return
+        
+        self.logger.info("运行时凭证已更新")
+        
+        # 更新依赖服务的凭证
         if self.comment_fetcher:
             self.comment_fetcher.credential = self.credential
         if self.summarizer and hasattr(self.summarizer, "subtitle_fetcher"):
@@ -1728,6 +1741,9 @@ class MonitorService:
                         await self._check_and_refresh_credential()
                         await self._poll_qr_login_status()
 
+            # 启动时立即检查一次凭证
+            asyncio.create_task(_check_credential())
+            
             scheduler.add_job(
                 _check_credential,
                 trigger="interval",

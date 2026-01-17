@@ -141,6 +141,8 @@ class MonitorService:
             author = modules.get("module_author", {})
             if author and isinstance(author, dict):
                 pub_ts = author.get("pub_ts")
+                if isinstance(pub_ts, str):
+                    pub_ts = int(pub_ts)
                 if pub_ts:
                     dt = datetime.fromtimestamp(pub_ts)
                     return f"发布时间：{dt.strftime('%Y-%m-%d %H:%M:%S')}"

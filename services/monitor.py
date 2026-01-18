@@ -22,8 +22,8 @@ from bilibili_api.comment import CommentResourceType
 
 from config import build_bilibili_credential
 
-from .comment_fetcher import CommentFetcher
 from .bilibili_auth import BilibiliAuth
+from .comment_fetcher import CommentFetcher
 
 
 class ConfigFileWatcher:
@@ -317,18 +317,19 @@ class MonitorService:
         """从 bilibili_auth.json 重新加载凭证并应用到运行时"""
         # 重新加载认证数据并应用到环境变量和 BILIBILI_CONFIG
         from config import apply_bilibili_config
+
         auth_data = self.auth._load_auth_data()
         if auth_data:
             apply_bilibili_config(auth_data)
-        
+
         # 重建 Credential 对象
         self.credential = build_bilibili_credential()
         if not self.credential:
             self.logger.warning("重新加载凭证后仍未能构建有效 Credential")
             return
-        
+
         self.logger.info("运行时凭证已更新")
-        
+
         # 更新依赖服务的凭证
         if self.comment_fetcher:
             self.comment_fetcher.credential = self.credential
@@ -863,9 +864,7 @@ class MonitorService:
             return int(mid)
         return None
 
-    def _is_creator_comment(
-        self, comm: Dict[str, Any], creator_uid: int
-    ) -> bool:
+    def _is_creator_comment(self, comm: Dict[str, Any], creator_uid: int) -> bool:
         mid = self._get_comment_author_uid(comm)
         if mid is None:
             return False
@@ -1738,12 +1737,12 @@ class MonitorService:
 
             # 添加凭证自动刷新任务（每6小时检查一次）
             async def _check_credential() -> None:
-                        await self._check_and_refresh_credential()
-                        await self._poll_qr_login_status()
+                await self._check_and_refresh_credential()
+                await self._poll_qr_login_status()
 
             # 启动时立即检查一次凭证
             asyncio.create_task(_check_credential())
-            
+
             scheduler.add_job(
                 _check_credential,
                 trigger="interval",
@@ -1755,6 +1754,20 @@ class MonitorService:
             self.logger.info(
                 f"凭证自动刷新已启动（每{self._CREDENTIAL_REFRESH_INTERVAL // 3600}小时检查一次）"
             )
+
+            # 添加高频 QR 登录轮询任务（每3秒检查一次）
+            async def _poll_qr() -> None:
+                await self._poll_qr_login_status()
+
+            scheduler.add_job(
+                _poll_qr,
+                trigger="interval",
+                seconds=3,
+                id="qr_poll",
+                max_instances=1,
+                coalesce=True,
+            )
+            self.logger.info("QR登录轮询已启动（每3秒检查一次）")
 
             # 设置初始创作者任务
             _setup_creator_jobs(scheduler, creators)

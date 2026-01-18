@@ -16,7 +16,7 @@ from typing import Optional, Tuple
 
 import aiohttp
 
-from config import apply_bilibili_config, build_bilibili_credential
+from config import apply_bilibili_config
 
 
 class BilibiliAuth:

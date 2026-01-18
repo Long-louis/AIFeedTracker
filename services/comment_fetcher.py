@@ -408,9 +408,7 @@ class CommentFetcher:
             return keyword_match and user_match and likes_match
 
     @staticmethod
-    def _flatten_comment_tree(
-        comments: List[Dict[str, Any]]
-    ) -> List[Dict[str, Any]]:
+    def _flatten_comment_tree(comments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """展开评论树（包含子回复），并做去重。"""
         if not comments:
             return []

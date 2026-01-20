@@ -103,7 +103,7 @@ class Creator:
     name: str
     check_interval: int = 300  # 默认5分钟
     enable_comments: bool = False  # 是否启用评论获取
-    comment_rules: List[Dict[str, Any]] = None  # 评论筛选规则列表（支持多规则）
+    comment_rules: Optional[List[Dict[str, Any]]] = None  # 评论筛选规则列表（支持多规则）
     comment_length_min: int = 10  # 博主评论长度阈值（严格大于才推送）
     comment_poll_interval_seconds: int = 600  # 视频/动态评论轮询间隔（秒）
     comment_poll_window_seconds: int = 24 * 3600  # 评论轮询窗口（秒）
@@ -230,6 +230,9 @@ class MonitorService:
 
     # 二维码提醒间隔（秒）：避免重复刷屏
     _QR_NOTIFY_INTERVAL = 10 * 60
+
+    # 评论轮询最多翻页数：避免高流量动态过度请求
+    _COMMENT_POLL_MAX_PAGES = 3
 
     def __init__(self, feishu_bot=None, summarizer=None, cookie: Optional[str] = None):
         """
@@ -817,6 +820,8 @@ class MonitorService:
 
             # 出现新的置顶评论：prev 为空，fp 非空；或 rpid 发生变化
             if fp and fp != prev:
+                if pinned is None:
+                    continue
                 await self._push_pinned_comment_update(
                     creator=creator,
                     item=it,
@@ -918,41 +923,80 @@ class MonitorService:
             last_seen_rpid = entry.get("last_seen_rpid")
             if last_seen_rpid is not None:
                 last_seen_rpid = str(last_seen_rpid)
+            last_seen_ctime = entry.get("last_seen_ctime")
+            if not isinstance(last_seen_ctime, (int, float)):
+                last_seen_ctime = 0
 
-            comments = await self.comment_fetcher.fetch_recent_comments_by_oid(
-                oid=oid,
-                type_=resource,
-                page_index=1,
-            )
+            def _rpid_str(comm: Dict[str, Any]) -> str:
+                rpid = comm.get("rpid")
+                if rpid is None:
+                    rpid = comm.get("rpid_str")
+                return str(rpid) if rpid is not None else ""
+
+            def _rpid_int(rpid_str: str) -> Optional[int]:
+                return int(rpid_str) if rpid_str.isdigit() else None
+
+            def _ctime(comm: Dict[str, Any]) -> int:
+                return int(comm.get("ctime", 0) or 0)
+
+            comments: List[Dict[str, Any]] = []
+            for page_index in range(1, self._COMMENT_POLL_MAX_PAGES + 1):
+                page_comments = await self.comment_fetcher.fetch_recent_comments_by_oid(
+                    oid=oid,
+                    type_=resource,
+                    page_index=page_index,
+                )
+                if not page_comments:
+                    break
+                comments.extend(page_comments)
+
+                if last_seen_ctime:
+                    page_max_ctime = max((_ctime(c) for c in page_comments), default=0)
+                    if page_max_ctime <= last_seen_ctime:
+                        break
 
             if not comments:
                 continue
 
             comments.sort(key=lambda c: int(c.get("ctime", 0) or 0))
 
-            new_comments: List[Dict[str, Any]] = []
-            for comm in comments:
-                rpid = comm.get("rpid")
-                if rpid is None:
-                    rpid = comm.get("rpid_str")
-                rpid_str = str(rpid) if rpid is not None else ""
-                if not rpid_str:
-                    continue
-                if last_seen_rpid is not None and rpid_str == last_seen_rpid:
-                    new_comments = []
-                    continue
-                new_comments.append(comm)
+            newest_comment = max(comments, key=_ctime)
+            newest_rpid = _rpid_str(newest_comment)
+            newest_ctime = _ctime(newest_comment)
 
-            if last_seen_rpid is None:
-                last_rpid = comments[-1].get("rpid")
-                if last_rpid is None:
-                    last_rpid = comments[-1].get("rpid_str")
-                if last_rpid is not None:
-                    entry["last_seen_rpid"] = str(last_rpid)
-                    video_map[key] = entry
+            if last_seen_rpid is None and last_seen_ctime <= 0:
+                if newest_rpid:
+                    entry["last_seen_rpid"] = newest_rpid
+                if newest_ctime:
+                    entry["last_seen_ctime"] = newest_ctime
+                video_map[key] = entry
                 continue
 
+            new_comments: List[Dict[str, Any]] = []
+            for comm in comments:
+                rpid_str = _rpid_str(comm)
+                if not rpid_str:
+                    continue
+                comm_ctime = _ctime(comm)
+                if last_seen_rpid is not None and rpid_str == last_seen_rpid:
+                    continue
+                if last_seen_ctime and comm_ctime < last_seen_ctime:
+                    continue
+                if last_seen_ctime and comm_ctime == last_seen_ctime:
+                    comm_rpid_int = _rpid_int(rpid_str)
+                    last_rpid_int = _rpid_int(last_seen_rpid or "")
+                    if comm_rpid_int is None or last_rpid_int is None:
+                        continue
+                    if comm_rpid_int <= last_rpid_int:
+                        continue
+                new_comments.append(comm)
+
             if not new_comments:
+                if newest_rpid:
+                    entry["last_seen_rpid"] = newest_rpid
+                if newest_ctime:
+                    entry["last_seen_ctime"] = newest_ctime
+                video_map[key] = entry
                 continue
 
             creator_comments = []
@@ -965,12 +1009,11 @@ class MonitorService:
                 creator_comments.append(comm)
 
             if not creator_comments:
-                last_rpid = comments[-1].get("rpid")
-                if last_rpid is None:
-                    last_rpid = comments[-1].get("rpid_str")
-                if last_rpid is not None:
-                    entry["last_seen_rpid"] = str(last_rpid)
-                    video_map[key] = entry
+                if newest_rpid:
+                    entry["last_seen_rpid"] = newest_rpid
+                if newest_ctime:
+                    entry["last_seen_ctime"] = newest_ctime
+                video_map[key] = entry
                 continue
 
             title = "（无文本内容）"
@@ -1005,12 +1048,11 @@ class MonitorService:
                 )
                 pushed = True
 
-            last_rpid = comments[-1].get("rpid")
-            if last_rpid is None:
-                last_rpid = comments[-1].get("rpid_str")
-            if last_rpid is not None:
-                entry["last_seen_rpid"] = str(last_rpid)
-                video_map[key] = entry
+            if newest_rpid:
+                entry["last_seen_rpid"] = newest_rpid
+            if newest_ctime:
+                entry["last_seen_ctime"] = newest_ctime
+            video_map[key] = entry
 
         self.state.set_comment_poll_state(creator.uid, now_ts, video_map)
         self.state.save()
@@ -1018,7 +1060,7 @@ class MonitorService:
     async def _push_pinned_comment_update(
         self, creator: Creator, item: Dict[str, Any], pinned_comment: Dict[str, Any]
     ) -> None:
-        if not self.feishu_bot:
+        if not self.feishu_bot or not self.comment_fetcher:
             return
 
         did = str(item.get("id_str") or item.get("id"))

@@ -97,17 +97,23 @@ class BilibiliAuth:
     def get_refresh_token(self) -> Optional[str]:
         """
         获取refresh_token
-        优先从.env读取，如果没有则从auth_data读取
+        优先使用ac_time_value（兼容B站refresh_token），然后再回退
         """
         # 优先从环境变量读取（.env文件）
         import os
+
+        env_ac_time_value = os.getenv("ac_time_value")
+        if env_ac_time_value:
+            return env_ac_time_value
 
         env_refresh_token = os.getenv("refresh_token")
         if env_refresh_token:
             return env_refresh_token
 
         # 如果env中没有，从json文件读取（兼容旧版本）
-        return self.auth_data.get("refresh_token")
+        return self.auth_data.get("ac_time_value") or self.auth_data.get(
+            "refresh_token"
+        )
 
     async def check_need_refresh(self, cookie: str) -> Tuple[bool, Optional[int]]:
         """

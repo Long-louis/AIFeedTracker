@@ -939,6 +939,31 @@ class MonitorService:
             def _ctime(comm: Dict[str, Any]) -> int:
                 return int(comm.get("ctime", 0) or 0)
 
+            def _parent_rpid_str(comm: Dict[str, Any]) -> str:
+                current_rpid = _rpid_str(comm)
+                for key in ("parent", "root"):
+                    value = comm.get(key)
+                    if value is None:
+                        continue
+                    value_str = str(value)
+                    if not value_str.isdigit():
+                        continue
+                    if current_rpid and value_str == current_rpid:
+                        continue
+                    if value_str == "0":
+                        continue
+                    return value_str
+                return ""
+
+            def _root_rpid_str(comm: Dict[str, Any]) -> str:
+                value = comm.get("root")
+                if value is None:
+                    return ""
+                value_str = str(value)
+                if not value_str.isdigit() or value_str == "0":
+                    return ""
+                return value_str
+
             comments: List[Dict[str, Any]] = []
             for page_index in range(1, self._COMMENT_POLL_MAX_PAGES + 1):
                 page_comments = await self.comment_fetcher.fetch_recent_comments_by_oid(
@@ -959,6 +984,14 @@ class MonitorService:
                 continue
 
             comments.sort(key=lambda c: int(c.get("ctime", 0) or 0))
+
+            comment_by_rpid: Dict[str, Dict[str, Any]] = {}
+            for comm in comments:
+                rpid_str = _rpid_str(comm)
+                if rpid_str:
+                    comment_by_rpid.setdefault(rpid_str, comm)
+
+            parent_cache: Dict[str, Dict[str, Any]] = {}
 
             newest_comment = max(comments, key=_ctime)
             newest_rpid = _rpid_str(newest_comment)
@@ -1036,6 +1069,47 @@ class MonitorService:
 
             for idx, comm in enumerate(creator_comments, 1):
                 comment_text = self.comment_fetcher.format_comment_for_display(comm)
+                reply_context = ""
+                parent_rpid = _parent_rpid_str(comm)
+                if parent_rpid:
+                    parent_comm = comment_by_rpid.get(parent_rpid) or parent_cache.get(
+                        parent_rpid
+                    )
+                    if parent_comm:
+                        parent_text = self.comment_fetcher.format_comment_for_display(
+                            parent_comm
+                        )
+                        reply_context = (
+                            f"**回复对象:**\n\n{parent_text}\n\n"
+                        )
+                    else:
+                        root_rpid = _root_rpid_str(comm)
+                        if self.comment_fetcher:
+                            parent_obj = await self.comment_fetcher.fetch_comment_by_rpid(
+                                oid=oid,
+                                type_=resource,
+                                rpid=int(parent_rpid),
+                                root_rpid=int(root_rpid)
+                                if root_rpid
+                                else None,
+                            )
+                            if parent_obj:
+                                parent_cache[parent_rpid] = parent_obj
+                                parent_text = (
+                                    self.comment_fetcher.format_comment_for_display(
+                                        parent_obj
+                                    )
+                                )
+                                reply_context = (
+                                    f"**回复对象:**\n\n{parent_text}\n\n"
+                                )
+                            else:
+                                reply_context = "**回复对象:**（未能获取原评论）\n\n"
+                        else:
+                            reply_context = "**回复对象:**（未能获取原评论）\n\n"
+
+                if reply_context:
+                    comment_section += reply_context
                 comment_section += f"**评论 {idx}:**\n\n{comment_text}\n\n"
 
             if self.feishu_bot:

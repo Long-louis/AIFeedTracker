@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional
 
 try:
     from bilibili_api import Credential, comment, video
-    from bilibili_api.comment import CommentResourceType, OrderType
+    from bilibili_api.comment import Comment, CommentResourceType, OrderType
 except ImportError:
     raise ImportError(
         "请安装 bilibili-api-python: pip install bilibili-api-python 或 uv add bilibili-api-python"
@@ -494,6 +494,63 @@ class CommentFetcher:
         except Exception as e:
             self.logger.error(f"格式化评论失败: {e}")
             return "评论格式化失败"
+
+    @staticmethod
+    def _extract_comment_payload(data: Any) -> Dict[str, Any]:
+        if isinstance(data, dict) and isinstance(data.get("data"), dict):
+            return data["data"]
+        if isinstance(data, dict):
+            return data
+        return {}
+
+    async def fetch_comment_by_rpid(
+        self,
+        oid: int,
+        type_: CommentResourceType,
+        rpid: int,
+        root_rpid: Optional[int] = None,
+        page_size: int = 20,
+    ) -> Optional[Dict[str, Any]]:
+        """按 rpid 拉取单条评论（必要时通过 root 的子评论接口查找）。"""
+        if not rpid:
+            return None
+        root = root_rpid or rpid
+
+        try:
+            root_comment = Comment(
+                oid=oid,
+                type_=type_,
+                rpid=int(root),
+                credential=self.credential,
+            )
+            response = await root_comment.get_sub_comments(
+                page_index=1,
+                page_size=page_size,
+            )
+        except Exception as exc:
+            self.logger.warning(f"获取评论失败 rpid={rpid}: {exc}")
+            return None
+
+        payload = self._extract_comment_payload(response)
+        if not payload:
+            return None
+
+        root_obj = payload.get("root")
+        if isinstance(root_obj, dict):
+            root_rpid = root_obj.get("rpid") or root_obj.get("rpid_str")
+            if root_rpid is not None and str(root_rpid) == str(rpid):
+                return root_obj
+
+        replies = payload.get("replies")
+        if not isinstance(replies, list):
+            return None
+
+        for comm in self._flatten_comment_tree(replies):
+            comm_rpid = comm.get("rpid") or comm.get("rpid_str")
+            if comm_rpid is not None and str(comm_rpid) == str(rpid):
+                return comm
+
+        return None
 
     async def fetch_recent_comments_by_oid(
         self,

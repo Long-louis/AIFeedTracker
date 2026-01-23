@@ -965,6 +965,7 @@ class MonitorService:
                 return value_str
 
             comments: List[Dict[str, Any]] = []
+            seen_rpids: set[str] = set()
             for page_index in range(1, self._COMMENT_POLL_MAX_PAGES + 1):
                 page_comments = await self.comment_fetcher.fetch_recent_comments_by_oid(
                     oid=oid,
@@ -973,7 +974,12 @@ class MonitorService:
                 )
                 if not page_comments:
                     break
-                comments.extend(page_comments)
+                # 去重：置顶评论会在每一页重复出现
+                for comm in page_comments:
+                    rpid = _rpid_str(comm)
+                    if rpid and rpid not in seen_rpids:
+                        seen_rpids.add(rpid)
+                        comments.append(comm)
 
                 if last_seen_ctime:
                     page_max_ctime = max((_ctime(c) for c in page_comments), default=0)

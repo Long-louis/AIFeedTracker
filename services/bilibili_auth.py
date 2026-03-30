@@ -85,6 +85,22 @@ class BilibiliAuth:
         self.auth_data["qr_last_notify_ts"] = float(ts)
         self._save_auth_data()
 
+    def get_qr_pending_notify_reason(self) -> Optional[str]:
+        reason = self.auth_data.get("qr_pending_notify_reason")
+        if isinstance(reason, str) and reason:
+            return reason
+        return None
+
+    def set_qr_pending_notify_reason(self, reason: str) -> None:
+        self.auth_data["qr_pending_notify_reason"] = str(reason)
+        self._save_auth_data()
+
+    def clear_qr_pending_notify_reason(self) -> None:
+        if "qr_pending_notify_reason" not in self.auth_data:
+            return
+        self.auth_data.pop("qr_pending_notify_reason", None)
+        self._save_auth_data()
+
     def set_credential_values(self, values: dict) -> None:
         """写入并应用B站凭证（不写 .env）。"""
         for k, v in values.items():

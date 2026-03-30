@@ -103,7 +103,9 @@ class Creator:
     name: str
     check_interval: int = 300  # 默认5分钟
     enable_comments: bool = False  # 是否启用评论获取
-    comment_rules: Optional[List[Dict[str, Any]]] = None  # 评论筛选规则列表（支持多规则）
+    comment_rules: Optional[List[Dict[str, Any]]] = (
+        None  # 评论筛选规则列表（支持多规则）
+    )
     comment_length_min: int = 10  # 博主评论长度阈值（严格大于才推送）
     comment_poll_interval_seconds: int = 600  # 视频/动态评论轮询间隔（秒）
     comment_poll_window_seconds: int = 24 * 3600  # 评论轮询窗口（秒）
@@ -231,6 +233,10 @@ class MonitorService:
     # 二维码提醒间隔（秒）：避免重复刷屏
     _QR_NOTIFY_INTERVAL = 10 * 60
 
+    # 夜间静默时段：避免在休息时间反复推送已过期二维码
+    _QR_QUIET_HOURS_START = 23
+    _QR_QUIET_HOURS_END = 8
+
     # 评论轮询最多翻页数：避免高流量动态过度请求
     _COMMENT_POLL_MAX_PAGES = 3
 
@@ -339,13 +345,15 @@ class MonitorService:
         if self.summarizer and hasattr(self.summarizer, "subtitle_fetcher"):
             self.summarizer.subtitle_fetcher.credential = self.credential
 
-    async def _notify_qr_login_needed(self, reason: str) -> None:
-        if not self.feishu_bot:
-            return
+    def _get_current_local_hour(self) -> int:
+        return datetime.now().hour
 
-        now_ts = time.time()
-        last_notify = self.auth.get_qr_last_notify_ts()
-        if now_ts - last_notify < self._QR_NOTIFY_INTERVAL:
+    def _is_qr_quiet_hours(self) -> bool:
+        hour = self._get_current_local_hour()
+        return hour >= self._QR_QUIET_HOURS_START or hour < self._QR_QUIET_HOURS_END
+
+    async def _dispatch_qr_login_notification(self, reason: str) -> None:
+        if not self.feishu_bot:
             return
 
         if not self.auth.has_active_qr_login():
@@ -369,9 +377,27 @@ class MonitorService:
             "B站登录过期，需要扫码",
             content,
         )
+
+    async def _notify_qr_login_needed(self, reason: str, force: bool = False) -> None:
+        if self._is_qr_quiet_hours():
+            self.auth.set_qr_pending_notify_reason(reason)
+            return
+
+        now_ts = time.time()
+        last_notify = self.auth.get_qr_last_notify_ts()
+        if not force and now_ts - last_notify < self._QR_NOTIFY_INTERVAL:
+            return
+
+        await self._dispatch_qr_login_notification(reason)
+        self.auth.clear_qr_pending_notify_reason()
         self.auth.set_qr_last_notify_ts(now_ts)
 
     async def _poll_qr_login_status(self) -> None:
+        pending_reason = self.auth.get_qr_pending_notify_reason()
+        if pending_reason and not self._is_qr_quiet_hours():
+            await self._notify_qr_login_needed(pending_reason, force=True)
+            return
+
         if not self.auth.has_active_qr_login():
             return
 
@@ -380,11 +406,12 @@ class MonitorService:
             return
 
         if state == "timeout":
-            await self._notify_qr_login_needed("二维码已过期，请重新扫码")
+            await self._notify_qr_login_needed("二维码已过期，请重新扫码", force=True)
             return
 
         if state == "done" and values:
             self.auth.set_credential_values(values)
+            self.auth.clear_qr_pending_notify_reason()
             self._refresh_runtime_credential()
             if self.feishu_bot:
                 await self.feishu_bot.send_system_notification(
@@ -1085,19 +1112,17 @@ class MonitorService:
                         parent_text = self.comment_fetcher.format_comment_for_display(
                             parent_comm
                         )
-                        reply_context = (
-                            f"**回复对象:**\n\n{parent_text}\n\n"
-                        )
+                        reply_context = f"**回复对象:**\n\n{parent_text}\n\n"
                     else:
                         root_rpid = _root_rpid_str(comm)
                         if self.comment_fetcher:
-                            parent_obj = await self.comment_fetcher.fetch_comment_by_rpid(
-                                oid=oid,
-                                type_=resource,
-                                rpid=int(parent_rpid),
-                                root_rpid=int(root_rpid)
-                                if root_rpid
-                                else None,
+                            parent_obj = (
+                                await self.comment_fetcher.fetch_comment_by_rpid(
+                                    oid=oid,
+                                    type_=resource,
+                                    rpid=int(parent_rpid),
+                                    root_rpid=int(root_rpid) if root_rpid else None,
+                                )
                             )
                             if parent_obj:
                                 parent_cache[parent_rpid] = parent_obj
@@ -1106,9 +1131,7 @@ class MonitorService:
                                         parent_obj
                                     )
                                 )
-                                reply_context = (
-                                    f"**回复对象:**\n\n{parent_text}\n\n"
-                                )
+                                reply_context = f"**回复对象:**\n\n{parent_text}\n\n"
                             else:
                                 reply_context = "**回复对象:**（未能获取原评论）\n\n"
                         else:

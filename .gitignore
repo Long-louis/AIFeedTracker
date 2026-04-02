@@ -24,6 +24,8 @@ browser_data/
 
 # Internal development files (keep locally, don't push)
 .cursor/
+.worktrees/
+docs/superpowers/
 
 # Server-local deploy files
 deploy/.env

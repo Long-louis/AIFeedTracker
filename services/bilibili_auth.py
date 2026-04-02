@@ -368,15 +368,29 @@ class BilibiliAuth:
     def has_active_qr_login(self) -> bool:
         return self._qr_login is not None
 
+    def _qr_library_temp_dir(self) -> Path:
+        return self.QR_CODE_PATH.parent / "_login_v2_tmp"
+
     async def start_qr_login(self) -> str:
         """生成二维码并落盘，返回二维码文件路径。"""
         from bilibili_api import login_v2
 
-        self._qr_login = login_v2.QrCodeLogin()
-        await self._qr_login.generate_qrcode()
-
         os.makedirs(self.QR_CODE_PATH.parent, exist_ok=True)
+        temp_dir = self._qr_library_temp_dir()
+        os.makedirs(temp_dir, exist_ok=True)
+
+        self._qr_login = login_v2.QrCodeLogin()
+        original_tempdir = login_v2.tempfile.tempdir
+        login_v2.tempfile.tempdir = str(temp_dir)
+        try:
+            await self._qr_login.generate_qrcode()
+        finally:
+            login_v2.tempfile.tempdir = original_tempdir
+
         self._qr_login.get_qrcode_picture().to_file(str(self.QR_CODE_PATH))
+        generated_qrcode = temp_dir / "qrcode.png"
+        if generated_qrcode.exists():
+            generated_qrcode.unlink()
         self.auth_data["qr_login_ts"] = time.time()
         self._save_auth_data()
         return str(self.QR_CODE_PATH)

@@ -8,12 +8,17 @@
 """
 
 import asyncio
+import os
 import time
 import unittest
 
 from services import FeishuBot, MonitorService
 
 
+@unittest.skipUnless(
+    os.getenv("RUN_QR_LOGIN_E2E") == "1",
+    "manual QR login e2e test; set RUN_QR_LOGIN_E2E=1 to enable",
+)
 class TestQrLoginFlow(unittest.IsolatedAsyncioTestCase):
     async def test_qr_login_notify_and_update(self):
         feishu_bot = FeishuBot()

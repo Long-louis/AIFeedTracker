@@ -1325,6 +1325,149 @@ class MonitorService:
                 return bvid, title
         return None
 
+    def _render_dynamic_message(self, item: Dict[str, Any]) -> Dict[str, str]:
+        render_type = self._classify_dynamic_render_type(item)
+        if render_type == "video":
+            return self._render_video_dynamic_message(item)
+        if render_type == "opus":
+            return self._render_opus_dynamic_message(item)
+        if render_type == "live":
+            return self._render_live_dynamic_message(item)
+        if render_type == "text":
+            return self._render_text_dynamic_message(item)
+        return self._render_fallback_dynamic_message(item)
+
+    def _classify_dynamic_render_type(self, item: Dict[str, Any]) -> str:
+        vinfo = self.extract_video_info(item)
+        if vinfo:
+            return "video"
+
+        major = item.get("modules", {}).get("module_dynamic", {}).get("major")
+        if isinstance(major, dict):
+            major_type = major.get("type")
+            if major_type == "MAJOR_TYPE_OPUS" or major_type == "MAJOR_TYPE_DRAW":
+                return "opus"
+            if major_type in ("MAJOR_TYPE_LIVE_RCMD", "MAJOR_TYPE_LIVE", "live_rcmd"):
+                return "live"
+            if isinstance(major.get("live_rcmd") or major.get("live"), dict):
+                return "live"
+            for key in ("common", "ugc_season", "music", "goods", "reserve"):
+                card = major.get(key)
+                if isinstance(card, dict) and (
+                    (isinstance(card.get("title"), str) and card.get("title").strip())
+                    or (
+                        isinstance(card.get("jump_url") or card.get("url"), str)
+                        and (card.get("jump_url") or card.get("url")).strip()
+                    )
+                ):
+                    return "fallback"
+
+        if self.parse_text_from_item(item).strip() or self._parse_orig_dynamic(item):
+            return "text"
+        if self.is_charge_dynamic(item):
+            return "text"
+        return "fallback"
+
+    def _dynamic_url(self, item: Dict[str, Any]) -> str:
+        did = str(item.get("id_str") or item.get("id") or "")
+        return self.DYNAMIC_PC_URL.format(dynamic_id=did)
+
+    def _build_render_result(
+        self,
+        *,
+        addition_title: str,
+        markdown_content: str,
+        addition_subtitle: str = "",
+    ) -> Dict[str, str]:
+        return {
+            "addition_title": addition_title,
+            "addition_subtitle": addition_subtitle,
+            "markdown_content": markdown_content,
+        }
+
+    def _render_video_dynamic_message(self, item: Dict[str, Any]) -> Dict[str, str]:
+        bvid, title = self.extract_video_info(item) or ("", "(无标题视频)")
+        dynamic_url = self._dynamic_url(item)
+        video_url = self.VIDEO_PC_URL.format(bvid=bvid)
+        pub_time = self.get_publish_time(item)
+        charge_prefix = "**【充电】**\n\n" if self.is_charge_dynamic(item) else ""
+
+        parts = [
+            f"{charge_prefix}**{title}**",
+            f"[原视频链接]({video_url})",
+            f"[动态链接]({dynamic_url})",
+        ]
+        if pub_time:
+            parts.append(pub_time)
+        return self._build_render_result(
+            addition_title="发布新视频",
+            markdown_content="\n\n".join(parts),
+        )
+
+    def _render_opus_dynamic_message(self, item: Dict[str, Any]) -> Dict[str, str]:
+        text = self.parse_text_from_item(item).strip() or "(无文本内容)"
+        pub_time = self.get_publish_time(item)
+        dynamic_url = self._dynamic_url(item)
+
+        parts = [text, f"[查看原动态]({dynamic_url})"]
+        if pub_time:
+            parts.append(pub_time)
+        return self._build_render_result(
+            addition_title="发布图文动态",
+            markdown_content="\n\n".join(parts),
+        )
+
+    def _render_text_dynamic_message(self, item: Dict[str, Any]) -> Dict[str, str]:
+        text = self.parse_text_from_item(item).strip()
+        orig_content = self._parse_orig_dynamic(item)
+        pub_time = self.get_publish_time(item)
+        dynamic_url = self._dynamic_url(item)
+        is_charge = self.is_charge_dynamic(item)
+        charge_prefix = "**【充电】**\n\n" if is_charge else ""
+
+        parts = []
+        if text:
+            parts.append(f"{charge_prefix}{text}")
+        elif is_charge:
+            parts.append(f"{charge_prefix}🔒 充电专属内容，请前往 B 站查看")
+        elif not orig_content:
+            parts.append("(无文本内容)")
+        if orig_content:
+            parts.append(f"---\n\n**转发内容：**\n{orig_content}")
+        parts.append(f"[查看原动态]({dynamic_url})")
+        if pub_time:
+            parts.append(pub_time)
+        return self._build_render_result(
+            addition_title="发布文字动态",
+            markdown_content="\n\n".join(parts),
+        )
+
+    def _render_live_dynamic_message(self, item: Dict[str, Any]) -> Dict[str, str]:
+        text = self.parse_text_from_item(item).strip() or "(无直播内容)"
+        pub_time = self.get_publish_time(item)
+        dynamic_url = self._dynamic_url(item)
+
+        parts = [text, f"[查看原动态]({dynamic_url})"]
+        if pub_time:
+            parts.append(pub_time)
+        return self._build_render_result(
+            addition_title="直播动态",
+            markdown_content="\n\n".join(parts),
+        )
+
+    def _render_fallback_dynamic_message(self, item: Dict[str, Any]) -> Dict[str, str]:
+        text = self.parse_text_from_item(item).strip() or "(无文本内容)"
+        pub_time = self.get_publish_time(item)
+        dynamic_url = self._dynamic_url(item)
+
+        parts = [text, f"[查看原动态]({dynamic_url})"]
+        if pub_time:
+            parts.append(pub_time)
+        return self._build_render_result(
+            addition_title="发布新动态",
+            markdown_content="\n\n".join(parts),
+        )
+
     async def fetch_user_space_dynamics(
         self, uid: int, limit_recent: int = 20
     ) -> Dict[str, Any]:
@@ -1541,15 +1684,8 @@ class MonitorService:
         """处理视频动态"""
         bvid, title = vinfo
         video_url = self.VIDEO_PC_URL.format(bvid=bvid)
-
-        pub_time = self.get_publish_time(item)
-
-        charge_prefix = ""
-        if self.is_charge_dynamic(item):
-            charge_prefix = "**【充电】**\n\n"
-
-        # 构建markdown内容
-        markdown_content = f"{charge_prefix}**{title}**\n\n[原视频链接]({video_url})\n[动态链接]({dynamic_url})"
+        rendered = self._render_video_dynamic_message(item)
+        markdown_content = rendered["markdown_content"]
 
         # 🆕 评论获取功能
         comment_content = await self._fetch_video_comments(bvid, title, creator)
@@ -1578,11 +1714,8 @@ class MonitorService:
             self.logger.error(f"AI总结异常: {e}")
             summary_text = f"AI总结异常：{str(e)}"
 
-        # 添加总结和时间
         if summary_text:
             markdown_content += f"\n\n{summary_text}"
-        if pub_time:
-            markdown_content += f"\n\n{pub_time}"
 
         # 发送到飞书
         if self.feishu_bot:
@@ -1591,7 +1724,8 @@ class MonitorService:
                 "哔哩哔哩",
                 markdown_content,
                 channel=creator.feishu_channel,
-                addition_title="发布新视频",
+                addition_title=rendered["addition_title"],
+                addition_subtitle=rendered["addition_subtitle"],
             )
 
     async def _fetch_video_comments(
@@ -1660,44 +1794,24 @@ class MonitorService:
         self, item: Dict[str, Any], creator: Creator, url: str
     ) -> None:
         """处理文字动态"""
-        text = self.parse_text_from_item(item)
-        is_charge = self.is_charge_dynamic(item)
+        rendered = self._render_dynamic_message(item)
 
-        # 解析转发的原动态内容
-        orig_content = self._parse_orig_dynamic(item)
-
-        # 充电动态且无内容时，简化提示（避免 Cookie 过期导致的"无文本内容"）
-        if not text and is_charge:
-            text = "🔒 充电专属内容，请前往 B 站查看"
-        elif not text:
-            text = "(无文本内容)"
-
-        charge_prefix = ""
-        if is_charge:
-            charge_prefix = "**【充电】**\n\n"
-
-        pub_time = self.get_publish_time(item)
-
-        # 构建markdown内容
-        markdown_content = f"{charge_prefix}{text}"
-
-        # 添加转发的原动态内容
-        if orig_content:
-            markdown_content += f"\n\n---\n\n**转发内容：**\n{orig_content}"
-
-        if pub_time:
-            markdown_content += f"\n\n{pub_time}"
-
-        markdown_content += f"\n\n[查看原动态]({url})"
+        self.logger.info(
+            "Render dynamic did=%s type=%s title=%s",
+            str(item.get("id_str") or item.get("id")),
+            self._classify_dynamic_render_type(item),
+            rendered["addition_title"],
+        )
 
         # 发送到飞书
         if self.feishu_bot:
             await self.feishu_bot.send_card_message(
                 creator.name,
                 "哔哩哔哩",
-                markdown_content,
+                rendered["markdown_content"],
                 channel=creator.feishu_channel,
-                addition_title="发布新动态",
+                addition_title=rendered["addition_title"],
+                addition_subtitle=rendered["addition_subtitle"],
             )
 
     async def monitor_single_creator(self, creator: Creator) -> None:

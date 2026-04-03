@@ -1,123 +1,76 @@
-# 飞书卡片模板与 Webhook 配置指南
+# 飞书卡片配置
 
-本项目使用 **飞书群自定义机器人 Webhook（V2）** 推送模板卡片消息。
+项目通过飞书群机器人 Webhook 推送模板卡片消息。推荐直接使用仓库里的 `docs/博主更新订阅.card` 作为起点。
 
-核心原则：
-- **Webhook-only**（不使用飞书应用机器人），避免配置复杂和权限/用户 open_id 依赖
-- **通道注册表**（channels registry）集中管理多个 webhook 和默认路由
+## 你需要准备的内容
 
-你只需要：
-1) 在飞书卡片搭建工具里创建/导入模板卡片，拿到 `template_id` 和 `template_version_name`
-2) 在飞书群里创建自定义机器人，拿到 webhook url（以及可选的 secret）
-3) 填写 `data/feishu_channels.json` 并在 `.env` 里配置模板信息
+1. 一个飞书卡片模板
+2. 一个或多个飞书群机器人 Webhook
+3. `.env` 中的模板信息
+4. `data/feishu_channels.json` 中的通道配置
 
-> 可选：如果你想使用飞书应用机器人（例如发送到指定 open_id 的用户），可以在 `data/feishu_channels.json` 中添加 `apps` 节点并在 `defaults` 中使用 `app:<name>` 或在某个 UP 的 `feishu_channel` 中使用 `app:<name>`。应用模式会在需要时懒加载 `lark-oapi`，并仅在配置完整时启用。
+## 导入卡片模板
 
-## 快速创建卡片模板
+1. 打开飞书开放平台并进入卡片搭建工具。
+2. 导入 `docs/博主更新订阅.card`。
+3. 发布后记录：
+   - `template_id`
+   - `template_version_name`
 
-### 方式一：使用项目提供的卡片文件（推荐）
-
-项目已提供现成的卡片模板文件：`docs/博主更新订阅.card`
-
-#### 步骤：
-
-1. **访问飞书开放平台**
-   
-   打开 [飞书开放平台](https://open.feishu.cn/)，进入您的应用管理页面
-
-2. **进入消息卡片功能**
-   
-   在应用详情页，找到「消息卡片」→「卡片搭建工具」
-
-3. **导入卡片文件**
-   
-   - 点击「导入」按钮
-   - 选择项目中的 `docs/博主更新订阅.card` 文件
-   - 卡片模板会自动加载
-
-4. **预览和调整**
-   
-   - 检查卡片预览效果
-   - 如需调整颜色或样式，可在可视化编辑器中修改
-   - 卡片包含3个变量：
-     - `platform` - 平台名称（如：哔哩哔哩）
-     - `Influencer` - 博主名称
-     - `markdown_content` - Markdown格式内容
-
-5. **发布卡片**
-   
-   - 点击「保存并发布」
-   - 记录生成的：
-     - **模板ID** (`template_id`)
-     - **版本名称** (`template_version_name`)
-
-#### 卡片变量说明（v1.0.2）
-
-| 变量名 | 说明 | 示例 |
-|--------|------|------|
-| `Influencer` | 博主名称（主标题） | 某某博主 |
-| `addition_title` | 主标题附加文字（跟在 Influencer 后） | 发布新视频、发布新动态、置顶评论更新 |
-| `platform` | 平台名称（副标题） | 哔哩哔哩 |
-| `addition_subtitle` | 副标题附加文字（跟在 platform 后） | 预留，暂未使用 |
-| `markdown_content` | Markdown 格式正文内容 | 视频标题、AI总结等 |
-
-#### 卡片预览效果
-
-```
-┌──────────────────────────────────────┐
-│ 某某博主 发布新视频                    │  ← 主标题（Influencer + addition_title）
-│ 哔哩哔哩                              │  ← 副标题（platform + addition_subtitle）
-├──────────────────────────────────────┤
-│                                      │
-│ 📌 核心观点                           │  ← Markdown内容
-│ - 要点1                               │
-│ - 要点2                               │
-│                                      │
-│ 💡 关键亮点                           │
-│ 这是总结内容...                       │
-│                                      │
-│ [查看原视频](链接)                    │
-│                                      │
-└──────────────────────────────────────┘
-```
-
-
-## 配置到项目
-
-### 更新 .env 文件
+把这两个值写入 `.env`：
 
 ```env
-# 飞书消息配置
-FEISHU_TEMPLATE_ID=您的消息模板ID
-FEISHU_TEMPLATE_VERSION=您的消息模板版本
-
-# （可选）通道注册表文件路径，默认 data/feishu_channels.json
-# FEISHU_CHANNELS_CONFIG=data/feishu_channels.json
+FEISHU_TEMPLATE_ID=your-template-id
+FEISHU_TEMPLATE_VERSION=your-template-version
 ```
 
-### 配置通道注册表（多 webhook）
+## 配置 Webhook 通道
 
-1. 复制示例文件：
+先复制示例文件：
 
 ```bash
 cp data/feishu_channels.json.example data/feishu_channels.json
 ```
 
-2. 编辑 `data/feishu_channels.json`：
-
-- 在 `webhooks` 中添加多个命名 webhook（例如 `default`、`alerts`）
-- 在 `defaults` 中设置默认路由：
-   - `defaults.content`：内容推送走哪个 webhook
-   - `defaults.alert`：告警推送走哪个 webhook
-
-3. （可选）为不同 UP 指定不同 webhook：
-
-在 `data/bilibili_creators.json` 的每个对象里增加：
+然后填写真实 Webhook：
 
 ```json
 {
-   "uid": 123456,
-   "name": "某UP",
-   "feishu_channel": "webhook:default"
+  "defaults": {
+    "content": "webhook:default",
+    "alert": "webhook:alerts"
+  },
+  "webhooks": {
+    "default": {
+      "url": "https://open.feishu.cn/open-apis/bot/v2/hook/REPLACE_ME",
+      "secret": ""
+    },
+    "alerts": {
+      "url": "https://open.feishu.cn/open-apis/bot/v2/hook/REPLACE_ME",
+      "secret": ""
+    }
+  }
 }
 ```
+
+## 为订阅单独指定通道
+
+在 `data/bilibili_creators.json` 里可以给某个 UP 主单独指定通道：
+
+```json
+{
+  "uid": 123456,
+  "name": "示例UP主",
+  "feishu_channel": "webhook:default"
+}
+```
+
+## 验证
+
+完成配置后运行：
+
+```bash
+uv run python main.py --mode monitor --once
+```
+
+如果卡片模板字段不匹配，请检查模板里是否包含 `Influencer`、`addition_title`、`platform`、`addition_subtitle`、`markdown_content` 这些变量。

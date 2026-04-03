@@ -13,12 +13,4 @@
       "secret": ""
     }
   }
-  ,
-  "apps": {
-    "default": {
-      "app_id": "",
-      "app_secret": "",
-      "user_open_id": ""
-    }
-  }
 }

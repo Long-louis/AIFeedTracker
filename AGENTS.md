@@ -19,7 +19,7 @@
 	- `aiohttp`（HTTP）
 	- `python-dotenv`（读取 `.env`）
 	- `openai`（兼容 DeepSeek/智谱/通义等 OpenAI 接口）
-- 本项目部署于远程服务器，部署方式和操作命令详见 `docs/DEPLOY_AUTOMATION.md`。
+- 本项目部署于远程服务器，部署相关文件位于 `deploy/docker-compose.yml`、`Dockerfile` 与 `scripts/`。
 ## 重要约束（减少返工）
 
 - **B 站相关实现**：优先参考 `bilibili-api-python` 文档（需要查询时请用 deepwiki）。
@@ -124,7 +124,7 @@ uv run python -m unittest discover -s tests -p "test_*.py" -q
 
 ## 服务器部署
 
-详见 `docs/DEPLOY_AUTOMATION.md`。
+部署相关文件位于 `deploy/docker-compose.yml`、`Dockerfile` 与 `scripts/`。
 
 ## CI/校验流水线
 
@@ -147,7 +147,7 @@ uv run python -m unittest discover -s tests -p "test_*.py" -q
 - 飞书：`docs/FEISHU_CARD_SETUP.md`
 - B 站凭证：`docs/BILIBILI_SETUP.md`
 - AI 总结：`docs/AI_SUMMARY_SETUP.md`
-- 部署：`docs/DEPLOY_AUTOMATION.md`
+- 部署：`deploy/docker-compose.yml`、`Dockerfile`、`scripts/`
 
 ---
 

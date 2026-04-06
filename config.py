@@ -42,15 +42,6 @@ FEISHU_CHANNELS_CONFIG = os.getenv(
     "FEISHU_CHANNELS_CONFIG", str(project_root / "data" / "feishu_channels.json")
 )
 
-# 兼容现有服务层仍使用的旧配置结构
-FEISHU_CONFIG = {
-    "app_id": FEISHU_APP_ID,
-    "app_secret": FEISHU_APP_SECRET,
-    "template_id": FEISHU_TEMPLATE_ID,
-    "template_version_name": FEISHU_TEMPLATE_VERSION,
-    "user_open_id": os.getenv("FEISHU_USER_OPEN_ID", "YOUR_USER_OPEN_ID"),
-}
-
 # B站配置
 BILIBILI_CONFIG = {
     "SESSDATA": os.getenv("SESSDATA"),

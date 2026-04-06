@@ -16,6 +16,8 @@ from typing import Optional, Tuple
 
 import aiohttp
 
+from config import apply_bilibili_config
+
 
 class BilibiliAuth:
     """B站认证管理类"""
@@ -31,10 +33,12 @@ class BilibiliAuth:
 
     # 存储路径
     AUTH_DATA_PATH = Path("data/bilibili_auth.json")
+    QR_CODE_PATH = Path("temp/bilibili_qrcode.png")
 
     def __init__(self):
         self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
         self.auth_data = self._load_auth_data()
+        self._qr_login = None
 
     def _load_auth_data(self) -> dict:
         """加载认证数据"""
@@ -56,6 +60,9 @@ class BilibiliAuth:
         except Exception as e:
             self.logger.error(f"保存认证数据失败: {e}")
 
+    def _apply_credentials(self, values: dict) -> None:
+        apply_bilibili_config(values)
+
     def set_refresh_token(self, refresh_token: str) -> None:
         """
         设置refresh_token
@@ -68,20 +75,61 @@ class BilibiliAuth:
         self._save_auth_data()
         self.logger.info("refresh_token已更新")
 
+    def get_qr_last_notify_ts(self) -> float:
+        ts = self.auth_data.get("qr_last_notify_ts")
+        if isinstance(ts, (int, float)):
+            return float(ts)
+        return 0.0
+
+    def set_qr_last_notify_ts(self, ts: float) -> None:
+        self.auth_data["qr_last_notify_ts"] = float(ts)
+        self._save_auth_data()
+
+    def get_qr_pending_notify_reason(self) -> Optional[str]:
+        reason = self.auth_data.get("qr_pending_notify_reason")
+        if isinstance(reason, str) and reason:
+            return reason
+        return None
+
+    def set_qr_pending_notify_reason(self, reason: str) -> None:
+        self.auth_data["qr_pending_notify_reason"] = str(reason)
+        self._save_auth_data()
+
+    def clear_qr_pending_notify_reason(self) -> None:
+        if "qr_pending_notify_reason" not in self.auth_data:
+            return
+        self.auth_data.pop("qr_pending_notify_reason", None)
+        self._save_auth_data()
+
+    def set_credential_values(self, values: dict) -> None:
+        """写入并应用B站凭证（不写 .env）。"""
+        for k, v in values.items():
+            if not v:
+                continue
+            self.auth_data[str(k)] = str(v)
+        self._save_auth_data()
+        self._apply_credentials(values)
+
     def get_refresh_token(self) -> Optional[str]:
         """
         获取refresh_token
-        优先从.env读取，如果没有则从auth_data读取
+        优先使用ac_time_value（兼容B站refresh_token），然后再回退
         """
         # 优先从环境变量读取（.env文件）
         import os
+
+        env_ac_time_value = os.getenv("ac_time_value")
+        if env_ac_time_value:
+            return env_ac_time_value
 
         env_refresh_token = os.getenv("refresh_token")
         if env_refresh_token:
             return env_refresh_token
 
         # 如果env中没有，从json文件读取（兼容旧版本）
-        return self.auth_data.get("refresh_token")
+        return self.auth_data.get("ac_time_value") or self.auth_data.get(
+            "refresh_token"
+        )
 
     async def check_need_refresh(self, cookie: str) -> Tuple[bool, Optional[int]]:
         """
@@ -316,6 +364,65 @@ class BilibiliAuth:
         except Exception as e:
             self.logger.error(f"自动刷新Cookie时出错: {e}")
             return current_cookie
+
+    def has_active_qr_login(self) -> bool:
+        return self._qr_login is not None
+
+    def _qr_library_temp_dir(self) -> Path:
+        return self.QR_CODE_PATH.parent / "_login_v2_tmp"
+
+    async def start_qr_login(self) -> str:
+        """生成二维码并落盘，返回二维码文件路径。"""
+        from bilibili_api import login_v2
+
+        os.makedirs(self.QR_CODE_PATH.parent, exist_ok=True)
+        temp_dir = self._qr_library_temp_dir()
+        os.makedirs(temp_dir, exist_ok=True)
+
+        self._qr_login = login_v2.QrCodeLogin()
+        original_tempdir = login_v2.tempfile.tempdir
+        login_v2.tempfile.tempdir = str(temp_dir)
+        try:
+            await self._qr_login.generate_qrcode()
+        finally:
+            login_v2.tempfile.tempdir = original_tempdir
+
+        self._qr_login.get_qrcode_picture().to_file(str(self.QR_CODE_PATH))
+        generated_qrcode = temp_dir / "qrcode.png"
+        if generated_qrcode.exists():
+            generated_qrcode.unlink()
+        self.auth_data["qr_login_ts"] = time.time()
+        self._save_auth_data()
+        return str(self.QR_CODE_PATH)
+
+    async def poll_qr_login(self) -> Tuple[str, Optional[dict]]:
+        """轮询扫码状态，返回 (state, values)。"""
+        from bilibili_api import login_v2
+
+        if not self._qr_login:
+            return "none", None
+
+        state = await self._qr_login.check_state()
+
+        if state == login_v2.QrCodeLoginEvents.TIMEOUT:
+            self._qr_login = None
+            return "timeout", None
+
+        if state != login_v2.QrCodeLoginEvents.DONE:
+            return "pending", None
+
+        cred = self._qr_login.get_credential()
+        self._qr_login = None
+        values = {
+            "SESSDATA": getattr(cred, "sessdata", None),
+            "bili_jct": getattr(cred, "bili_jct", None),
+            "buvid3": getattr(cred, "buvid3", None),
+            "buvid4": getattr(cred, "buvid4", None),
+            "DedeUserID": getattr(cred, "dedeuserid", None),
+            "DedeUserID__ckMd5": getattr(cred, "dedeuserid_ckmd5", None),
+            "ac_time_value": getattr(cred, "ac_time_value", None),
+        }
+        return "done", values
 
     @staticmethod
     def _extract_bili_jct(cookie: str) -> Optional[str]:

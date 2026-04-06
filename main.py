@@ -128,7 +128,7 @@ class AIVideoBot:
         except Exception as e:
             self.logger.error(f"发送通知异常: {e}")
 
-    async def start_monitoring(self, once: bool = False, reset: bool = False):
+    async def start_monitoring(self, once: bool = False):
         """启动动态监控
 
         Args:
@@ -169,11 +169,7 @@ class AIVideoBot:
                 self.logger.warning(f"发送监控启动通知失败: {e}")
 
             # 启动监控
-            await monitor_service.start_monitoring(
-                creators,
-                once=once,
-                backfill_on_start=bool(reset),
-            )
+            await monitor_service.start_monitoring(creators, once=once)
 
         except Exception as e:
             self.logger.error(f"动态监控异常: {e}")
@@ -260,7 +256,7 @@ async def main():
             print("启动服务模式...")
             while True:
                 try:
-                    await bot.start_monitoring(once=False, reset=args.reset)
+                    await bot.start_monitoring(once=False)
                 except KeyboardInterrupt:
                     print("\n收到停止信号，退出服务")
                     # 发送正常停止通知
@@ -289,7 +285,7 @@ async def main():
         else:
             # 监控模式
             print("启动动态监控模式...")
-            await bot.start_monitoring(once=args.once, reset=args.reset)
+            await bot.start_monitoring(once=args.once)
 
     except KeyboardInterrupt:
         print("\n收到中断信号，正在停止...")

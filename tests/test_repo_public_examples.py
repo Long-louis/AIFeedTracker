@@ -4,6 +4,9 @@ import unittest
 
 
 class TestRepoPublicExamples(unittest.TestCase):
+    def test_hidden_env_example_is_not_shipped(self):
+        self.assertFalse(Path(".env.example").exists())
+
     def test_creators_example_is_valid_json(self):
         data = json.loads(
             Path("data/bilibili_creators.json.example").read_text(encoding="utf-8")

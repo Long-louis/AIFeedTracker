@@ -83,9 +83,12 @@ class AIVideoBot:
         try:
             self.logger.info(f"开始总结视频: {video_url}")
 
-            success, message, summary_links, summary_contents = (
-                await self.ai_service.summarize_videos([video_url])
-            )
+            (
+                success,
+                message,
+                summary_links,
+                summary_contents,
+            ) = await self.ai_service.summarize_videos([video_url])
 
             if success and summary_contents:
                 # AI总结服务直接返回内容
@@ -125,7 +128,7 @@ class AIVideoBot:
         except Exception as e:
             self.logger.error(f"发送通知异常: {e}")
 
-    async def start_monitoring(self, once: bool = False):
+    async def start_monitoring(self, once: bool = False, reset: bool = False):
         """启动动态监控
 
         Args:
@@ -143,13 +146,19 @@ class AIVideoBot:
             creators = monitor_service.load_creators_from_file()
             self.logger.info(f"加载了 {len(creators)} 个创作者")
 
+            if not creators:
+                self.logger.warning(
+                    "未检测到任何创作者配置：请复制 data/bilibili_creators.json.example 为 data/bilibili_creators.json 并填写你的订阅列表"
+                )
+                return
+
             # 发送监控启动通知
             try:
                 creator_names = ", ".join([c.name for c in creators[:3]])
                 if len(creators) > 3:
                     creator_names += f" 等{len(creators)}个创作者"
 
-                content = f"监控服务已启动\n\n"
+                content = "监控服务已启动\n\n"
                 content += f"**监控对象:** {creator_names}\n"
                 content += f"**模式:** {'单次检查' if once else '持续监控'}"
 
@@ -160,7 +169,11 @@ class AIVideoBot:
                 self.logger.warning(f"发送监控启动通知失败: {e}")
 
             # 启动监控
-            await monitor_service.start_monitoring(creators, once=once)
+            await monitor_service.start_monitoring(
+                creators,
+                once=once,
+                backfill_on_start=bool(reset),
+            )
 
         except Exception as e:
             self.logger.error(f"动态监控异常: {e}")
@@ -222,6 +235,9 @@ async def main():
                 with open(state_file, "w", encoding="utf-8") as f:
                     f.write("{}")
                 print("状态已重置，将重新推送最近48小时内的动态")
+            else:
+                # 不存在则无需重置；首次运行会自动生成
+                print("未发现 data/bilibili_state.json：无需重置（首次运行会自动生成）")
 
         # 发送启动通知（非测试模式）
         if args.mode != "test":
@@ -244,7 +260,7 @@ async def main():
             print("启动服务模式...")
             while True:
                 try:
-                    await bot.start_monitoring(once=False)
+                    await bot.start_monitoring(once=False, reset=args.reset)
                 except KeyboardInterrupt:
                     print("\n收到停止信号，退出服务")
                     # 发送正常停止通知
@@ -273,7 +289,7 @@ async def main():
         else:
             # 监控模式
             print("启动动态监控模式...")
-            await bot.start_monitoring(once=args.once)
+            await bot.start_monitoring(once=args.once, reset=args.reset)
 
     except KeyboardInterrupt:
         print("\n收到中断信号，正在停止...")

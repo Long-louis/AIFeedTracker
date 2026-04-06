@@ -5,6 +5,7 @@
 统一管理项目的配置信息，包括环境变量加载和常量定义
 """
 
+import json
 import os
 from pathlib import Path
 from typing import Optional
@@ -24,25 +25,34 @@ env_file = project_root / ".env"
 if env_file.exists():
     load_dotenv(env_file)
 
-# 飞书配置
-# 注意：以下配置需要根据您自己的飞书应用进行修改
-# 详见文档: docs/FEISHU_CARD_SETUP.md
-FEISHU_CONFIG = {
-    "app_id": os.getenv("app_id"),
-    "app_secret": os.getenv("app_secret"),
-    "template_id": os.getenv("FEISHU_TEMPLATE_ID", "YOUR_TEMPLATE_ID"),  # 替换为您的卡片模板ID
-    "template_version_name": os.getenv("FEISHU_TEMPLATE_VERSION", "1.0.0"),  # 替换为您的卡片版本号
-    "user_open_id": os.getenv("FEISHU_USER_OPEN_ID", "YOUR_USER_OPEN_ID"),  # 替换为接收消息的用户open_id
-}
+# ============================================
+# Feishu 配置（Webhook-only，使用 channels registry）
+# ============================================
+
+# 模板卡片配置
+FEISHU_TEMPLATE_ID = os.getenv("FEISHU_TEMPLATE_ID", "YOUR_TEMPLATE_ID")
+FEISHU_TEMPLATE_VERSION = os.getenv("FEISHU_TEMPLATE_VERSION", "1.0.0")
+
+# 飞书应用配置（用于上传图片等需要 API 的功能）
+FEISHU_APP_ID = os.getenv("app_id", "")
+FEISHU_APP_SECRET = os.getenv("app_secret", "")
+
+# 通道注册表配置文件路径（默认 data/feishu_channels.json）
+FEISHU_CHANNELS_CONFIG = os.getenv(
+    "FEISHU_CHANNELS_CONFIG", str(project_root / "data" / "feishu_channels.json")
+)
 
 # B站配置
 BILIBILI_CONFIG = {
     "SESSDATA": os.getenv("SESSDATA"),
     "bili_jct": os.getenv("bili_jct"),
     "buvid3": os.getenv("buvid3"),
-    "DedeUserID": os.getenv("DedeUserID"),
+    "buvid4": os.getenv("buvid4"),
+    # 兼容两种写法
+    "DedeUserID": os.getenv("DedeUserID") or os.getenv("dedeuserid"),
     "DedeUserID__ckMd5": os.getenv("DedeUserID__ckMd5"),
-    "refresh_token": os.getenv("refresh_token"),  # 添加refresh_token支持
+    "ac_time_value": os.getenv("ac_time_value"),
+    "refresh_token": os.getenv("refresh_token"),
 }
 
 # API配置
@@ -61,6 +71,14 @@ AI_CONFIG = {
     "api_key": os.getenv("AI_API_KEY"),
     "base_url": os.getenv("AI_BASE_URL"),  # 可选，不设置则根据service自动选择
     "model": os.getenv("AI_MODEL"),  # 可选，不设置则根据service自动选择
+    # 适配长视频总结：按模型上下文窗口做 token 预算（DeepSeek 文档：128K）
+    "context_window_tokens": int(os.getenv("AI_CONTEXT_WINDOW_TOKENS", "128000")),
+    # DeepSeek-chat 默认 max output 4K（可在 .env 覆盖；若你开到 8K 也可写 8000）
+    "max_output_tokens": int(os.getenv("AI_MAX_OUTPUT_TOKENS", "4000")),
+    # 分段(map)阶段每段输出 token 上限
+    "map_max_output_tokens": int(os.getenv("AI_MAP_MAX_OUTPUT_TOKENS", "900")),
+    # tiktoken 编码名（DeepSeek OpenAI-compat 通常可用 cl100k_base；如你确认其它编码可覆盖）
+    "token_encoding": os.getenv("AI_TOKEN_ENCODING", "cl100k_base"),
 }
 
 # 反爬虫配置
@@ -72,20 +90,91 @@ ANTI_BAN_CONFIG = {
 
 
 def build_bilibili_cookie() -> Optional[str]:
-    """构建B站请求所需的Cookie字符串"""
+    """构建B站请求所需的Cookie字符串（仅Cookie字段）"""
+    cookie_keys = (
+        "SESSDATA",
+        "bili_jct",
+        "buvid3",
+        "buvid4",
+        "DedeUserID",
+        "DedeUserID__ckMd5",
+    )
     parts = []
-    for key, value in BILIBILI_CONFIG.items():
+    for key in cookie_keys:
+        value = BILIBILI_CONFIG.get(key)
         if value:
             parts.append(f"{key}={value}")
     return "; ".join(parts) if parts else None
 
 
+def build_bilibili_credential():
+    """创建 bilibili-api-python 的 Credential 对象（若缺关键字段则返回 None）"""
+
+    try:
+        from bilibili_api import Credential
+    except Exception:
+        return None
+
+    cfg = BILIBILI_CONFIG
+    if not cfg.get("SESSDATA"):
+        return None
+
+    return Credential(
+        sessdata=cfg.get("SESSDATA"),
+        bili_jct=cfg.get("bili_jct"),
+        buvid3=cfg.get("buvid3"),
+        buvid4=cfg.get("buvid4"),
+        dedeuserid=cfg.get("DedeUserID"),
+        ac_time_value=cfg.get("ac_time_value"),
+    )
+
+
+def apply_bilibili_config(values: dict) -> None:
+    """将新的B站凭证写入进程环境与运行时配置。"""
+    allowed_keys = {
+        "SESSDATA",
+        "bili_jct",
+        "buvid3",
+        "buvid4",
+        "DedeUserID",
+        "DedeUserID__ckMd5",
+        "ac_time_value",
+        "refresh_token",
+    }
+    for key, value in values.items():
+        if key not in allowed_keys:
+            continue
+        if not value:
+            continue
+        os.environ[str(key)] = str(value)
+        BILIBILI_CONFIG[str(key)] = str(value)
+
+
+def _load_bilibili_auth_data(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        raise ValueError("bilibili_auth.json 必须是 JSON object")
+    return data
+
+
+_AUTH_DATA_PATH = project_root / "data" / "bilibili_auth.json"
+_AUTH_DATA = _load_bilibili_auth_data(_AUTH_DATA_PATH)
+if _AUTH_DATA:
+    apply_bilibili_config(_AUTH_DATA)
+
+
 def get_config_status() -> dict:
     """获取配置状态，用于诊断"""
+    feishu_channels_exists = Path(FEISHU_CHANNELS_CONFIG).exists()
     return {
         "env_file_exists": env_file.exists(),
         "feishu_configured": bool(
-            FEISHU_CONFIG["app_id"] and FEISHU_CONFIG["app_secret"]
+            feishu_channels_exists
+            and FEISHU_TEMPLATE_ID
+            and FEISHU_TEMPLATE_ID != "YOUR_TEMPLATE_ID"
         ),
         "bilibili_configured": bool(BILIBILI_CONFIG["SESSDATA"]),
         "cookie_available": bool(build_bilibili_cookie()),

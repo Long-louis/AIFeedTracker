@@ -1,22 +1,14 @@
 [
   {
-    "uid": 11473291,
-    "name": "示例博主1",
+    "uid": 123456,
+    "name": "示例UP主",
     "platform": "bilibili",
     "enable_comments": false,
-    "comment_keywords": [
-      "关键词1",
-      "关键词2"
+    "crons": [
+      "*/3 9-14 * * *",
+      "*/10 0-8,15-23 * * *"
     ],
-    "check_interval": 300
-  },
-  {
-    "uid": 550494308,
-    "name": "示例博主2",
-    "platform": "bilibili",
-    "enable_comments": false,
-    "comment_keywords": [],
-    "check_interval": 600
+    "jitter_seconds": 60,
+    "feishu_channel": "webhook:default"
   }
 ]
-

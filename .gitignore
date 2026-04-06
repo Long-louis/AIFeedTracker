@@ -23,8 +23,16 @@ browser_data/
 *.pem
 
 # Internal development files (keep locally, don't push)
-.github/
 .cursor/
+.worktrees/
+docs/superpowers/
+
+# Server-local deploy files
+deploy/.env
+deploy/docker-compose.override.yml
+
+# Scripts directory (keep deployment scripts)
+!scripts/
 
 # Test files (root level only, keep tests/ directory)
 /test_*.py
@@ -39,10 +47,17 @@ log/
 *.log
 
 # Data files (contain runtime state and credentials)
-data/
-*.json
-# 但允许示例文件
+# 忽略运行时状态文件
+data/bilibili_state.json
+data/*.bak
+data/*.tmp
+# 本地私有配置文件
+data/feishu_channels.json
+data/bilibili_creators.json
+
+# 允许公开示例与说明文件
 !data/*.example
+!data/README.md
 
 # IDE files
 .vscode/
@@ -59,3 +74,4 @@ Thumbs.db
 backup/
 *.bak
 *.backup
+data/bilibili_auth.json

@@ -94,11 +94,11 @@ def _get_env_int(name: str, default: int) -> int:
 
 def load_local_asr_config() -> dict:
     return {
-        "enabled": _get_env_bool("LOCAL_ASR_ENABLED", True),
+        "enabled": _get_env_bool("LOCAL_ASR_ENABLED", False),
         "provider": _get_env_str("LOCAL_ASR_PROVIDER", "faster_whisper"),
         "model": _get_env_str("LOCAL_ASR_MODEL", "large-v3"),
-        "device": _get_env_str("LOCAL_ASR_DEVICE", "cuda"),
-        "compute_type": _get_env_str("LOCAL_ASR_COMPUTE_TYPE", "float16"),
+        "device": _get_env_str("LOCAL_ASR_DEVICE", "cpu"),
+        "compute_type": _get_env_str("LOCAL_ASR_COMPUTE_TYPE", "int8"),
         "language": _get_env_str("LOCAL_ASR_LANGUAGE", "zh"),
         "beam_size": _get_env_int("LOCAL_ASR_BEAM_SIZE", 5),
         "vad_filter": _get_env_bool("LOCAL_ASR_VAD_FILTER", True),

@@ -47,11 +47,11 @@ class TestLocalAsrConfig(unittest.TestCase):
         self.assertEqual(
             config.LOCAL_ASR_CONFIG,
             {
-                "enabled": True,
+                "enabled": False,
                 "provider": "faster_whisper",
                 "model": "large-v3",
-                "device": "cuda",
-                "compute_type": "float16",
+                "device": "cpu",
+                "compute_type": "int8",
                 "language": "zh",
                 "beam_size": 5,
                 "vad_filter": True,
@@ -127,7 +127,7 @@ class TestLocalAsrConfig(unittest.TestCase):
 
         config = _reload_config_module()
 
-        self.assertIs(config.LOCAL_ASR_CONFIG["enabled"], True)
+        self.assertIs(config.LOCAL_ASR_CONFIG["enabled"], False)
         self.assertEqual(config.LOCAL_ASR_CONFIG["beam_size"], 5)
         self.assertIs(config.LOCAL_ASR_CONFIG["vad_filter"], True)
         self.assertEqual(config.LOCAL_ASR_CONFIG["max_audio_minutes"], 90)

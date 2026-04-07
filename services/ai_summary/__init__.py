@@ -6,6 +6,15 @@ AI视频总结服务模块
 """
 
 from .service import AISummaryService
+from .audio_source_fetcher import AudioFetchErrorType
+from .audio_transcription_service import AudioTranscriptionService
 from .subtitle_fetcher import SubtitleErrorType
+from .whisper_transcriber import ASRErrorType
 
-__all__ = ["AISummaryService", "SubtitleErrorType"]
+__all__ = [
+    "AISummaryService",
+    "AudioFetchErrorType",
+    "AudioTranscriptionService",
+    "ASRErrorType",
+    "SubtitleErrorType",
+]

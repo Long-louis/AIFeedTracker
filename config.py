@@ -65,6 +65,50 @@ USER_AGENT = (
     or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 )
 
+
+def _get_env_str(name: str, default: str) -> str:
+    value = os.getenv(name)
+    if value is None or value == "":
+        return default
+    return value
+
+
+def _get_env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None or value == "":
+        return default
+    normalized_value = value.strip().lower()
+    if normalized_value in {"1", "true", "yes", "on"}:
+        return True
+    if normalized_value in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"Invalid boolean value for {name}: {value}")
+
+
+def _get_env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None or value == "":
+        return default
+    return int(value)
+
+
+def load_local_asr_config() -> dict:
+    return {
+        "enabled": _get_env_bool("LOCAL_ASR_ENABLED", True),
+        "provider": _get_env_str("LOCAL_ASR_PROVIDER", "faster_whisper"),
+        "model": _get_env_str("LOCAL_ASR_MODEL", "large-v3"),
+        "device": _get_env_str("LOCAL_ASR_DEVICE", "cuda"),
+        "compute_type": _get_env_str("LOCAL_ASR_COMPUTE_TYPE", "float16"),
+        "language": _get_env_str("LOCAL_ASR_LANGUAGE", "zh"),
+        "beam_size": _get_env_int("LOCAL_ASR_BEAM_SIZE", 5),
+        "vad_filter": _get_env_bool("LOCAL_ASR_VAD_FILTER", True),
+        "output_timestamps": _get_env_bool("LOCAL_ASR_OUTPUT_TIMESTAMPS", True),
+        "temp_dir": _get_env_str("LOCAL_ASR_TEMP_DIR", "./data/temp_asr"),
+        "max_audio_minutes": _get_env_int("LOCAL_ASR_MAX_AUDIO_MINUTES", 90),
+        "cleanup_temp_files": _get_env_bool("LOCAL_ASR_CLEANUP_TEMP_FILES", True),
+    }
+
+
 # AI总结服务配置
 AI_CONFIG = {
     "service": os.getenv("AI_SERVICE", "deepseek"),
@@ -80,6 +124,8 @@ AI_CONFIG = {
     # tiktoken 编码名（DeepSeek OpenAI-compat 通常可用 cl100k_base；如你确认其它编码可覆盖）
     "token_encoding": os.getenv("AI_TOKEN_ENCODING", "cl100k_base"),
 }
+
+LOCAL_ASR_CONFIG = load_local_asr_config()
 
 # 反爬虫配置
 ANTI_BAN_CONFIG = {

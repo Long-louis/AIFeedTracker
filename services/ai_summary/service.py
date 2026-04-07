@@ -8,9 +8,10 @@ AI总结服务主模块
 import logging
 from typing import Dict, List, Tuple
 
-from config import AI_CONFIG
+from config import AI_CONFIG, LOCAL_ASR_CONFIG
 
 from .ai_client import AIClient
+from .audio_transcription_service import AudioTranscriptionService
 from .subtitle_fetcher import SubtitleErrorType, SubtitleFetcher
 from .summary_generator import SummaryGenerator
 
@@ -44,6 +45,10 @@ class AISummaryService:
 
         # 初始化子服务
         self.subtitle_fetcher = SubtitleFetcher()
+        self.local_asr_enabled = bool(LOCAL_ASR_CONFIG.get("enabled"))
+        self.audio_transcription_service = None
+        if self.local_asr_enabled:
+            self.audio_transcription_service = AudioTranscriptionService()
 
         # 初始化AI客户端
         try:
@@ -67,6 +72,9 @@ class AISummaryService:
         except Exception as e:
             self.logger.error(f"AI总结服务初始化失败: {e}")
             raise
+
+    def _should_use_local_asr(self, error_type) -> bool:
+        return self.local_asr_enabled and error_type == SubtitleErrorType.NO_SUBTITLE
 
     async def summarize_videos(
         self, video_urls: List[str]
@@ -98,29 +106,56 @@ class AISummaryService:
                     subtitle = await self.subtitle_fetcher.fetch_subtitle(video_url)
 
                     if not subtitle:
-                        error_msg = f"获取字幕失败: {video_url}"
-                        self.logger.error(error_msg)
-                        failed_videos.append(video_url)
-
-                        # 根据错误类型生成详细的失败原因
                         error_type = self.subtitle_fetcher.last_error_type
                         detail = self.subtitle_fetcher.last_error
 
-                        if error_type == SubtitleErrorType.COOKIE_EXPIRED:
-                            summary_contents.append(f"❌ Cookie已失效: {detail}")
-                        elif error_type == SubtitleErrorType.CREDENTIAL_ERROR:
-                            summary_contents.append(f"❌ 凭证权限不足: {detail}")
-                        elif error_type == SubtitleErrorType.NO_SUBTITLE:
-                            summary_contents.append(f"❌ 视频无字幕: {detail}")
-                        elif error_type == SubtitleErrorType.VIDEO_NOT_FOUND:
-                            summary_contents.append(f"❌ 视频不存在: {detail}")
-                        elif error_type == SubtitleErrorType.NETWORK_ERROR:
-                            summary_contents.append(f"❌ 网络错误: {detail}")
-                        elif detail:
-                            summary_contents.append(f"❌ 获取字幕失败: {detail}")
+                        if self._should_use_local_asr(error_type):
+                            self.logger.info("字幕缺失，进入本地ASR兜底: %s", video_url)
+                            transcription_result = (
+                                await self.audio_transcription_service.transcribe_video(
+                                    video_url
+                                )
+                            )
+                            if transcription_result:
+                                subtitle = transcription_result["text"]
+                                self.logger.info(
+                                    "本地ASR转写成功，继续生成总结: %s", video_url
+                                )
+                            else:
+                                error_msg = f"本地转写失败: {video_url}"
+                                self.logger.error(error_msg)
+                                failed_videos.append(video_url)
+                                asr_detail = getattr(
+                                    self.audio_transcription_service, "last_error", None
+                                )
+                                if asr_detail:
+                                    summary_contents.append(
+                                        f"❌ 本地转写失败: {asr_detail}"
+                                    )
+                                else:
+                                    summary_contents.append("❌ 本地转写失败: 未知原因")
+                                continue
                         else:
-                            summary_contents.append("❌ 获取字幕失败: 未知原因")
-                        continue
+                            error_msg = f"获取字幕失败: {video_url}"
+                            self.logger.error(error_msg)
+                            failed_videos.append(video_url)
+
+                            # 根据错误类型生成详细的失败原因
+                            if error_type == SubtitleErrorType.COOKIE_EXPIRED:
+                                summary_contents.append(f"❌ Cookie已失效: {detail}")
+                            elif error_type == SubtitleErrorType.CREDENTIAL_ERROR:
+                                summary_contents.append(f"❌ 凭证权限不足: {detail}")
+                            elif error_type == SubtitleErrorType.NO_SUBTITLE:
+                                summary_contents.append(f"❌ 视频无字幕: {detail}")
+                            elif error_type == SubtitleErrorType.VIDEO_NOT_FOUND:
+                                summary_contents.append(f"❌ 视频不存在: {detail}")
+                            elif error_type == SubtitleErrorType.NETWORK_ERROR:
+                                summary_contents.append(f"❌ 网络错误: {detail}")
+                            elif detail:
+                                summary_contents.append(f"❌ 获取字幕失败: {detail}")
+                            else:
+                                summary_contents.append("❌ 获取字幕失败: 未知原因")
+                            continue
 
                     self.logger.info(f"字幕获取成功，长度: {len(subtitle)} 字符")
 

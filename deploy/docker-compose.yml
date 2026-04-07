@@ -1,0 +1,20 @@
+services:
+  ai-feed-tracker:
+    # 使用本地 Dockerfile 构建（而非从镜像仓库拉取）
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: ai-feed-tracker
+    restart: unless-stopped
+
+    # 你需要在服务器的 deploy/.env 里填写运行时环境变量（FEISHU_TEMPLATE_ID、AI_API_KEY 等）
+    env_file:
+      - .env
+
+    # 配置与运行时状态放在服务器本地（不会进入镜像/不会进入仓库）
+    volumes:
+      - ../data:/app/data
+      - ../log:/app/log
+    # 可选：如果你需要固定时区（也可以直接写进 .env）
+    # environment:
+    #   TZ: Asia/Shanghai

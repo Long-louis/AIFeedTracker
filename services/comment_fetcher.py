@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional
 
 try:
     from bilibili_api import Credential, comment, video
-    from bilibili_api.comment import CommentResourceType, OrderType
+    from bilibili_api.comment import Comment, CommentResourceType, OrderType
 except ImportError:
     raise ImportError(
         "请安装 bilibili-api-python: pip install bilibili-api-python 或 uv add bilibili-api-python"
@@ -407,6 +407,41 @@ class CommentFetcher:
             self.logger.warning(f"未知的筛选模式: {mode}，使用默认的'all'模式")
             return keyword_match and user_match and likes_match
 
+    @staticmethod
+    def _flatten_comment_tree(comments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """展开评论树（包含子回复），并做去重。"""
+        if not comments:
+            return []
+
+        flattened: List[Dict[str, Any]] = []
+        seen = set()
+        stack = list(comments)
+
+        while stack:
+            comm = stack.pop()
+            if not isinstance(comm, dict):
+                continue
+
+            rpid = comm.get("rpid")
+            if rpid is None:
+                rpid = comm.get("rpid_str")
+            rpid_str = str(rpid) if rpid is not None else ""
+            if rpid_str:
+                if rpid_str in seen:
+                    replies = comm.get("replies")
+                    if isinstance(replies, list) and replies:
+                        stack.extend(replies)
+                    continue
+                seen.add(rpid_str)
+
+            flattened.append(comm)
+
+            replies = comm.get("replies")
+            if isinstance(replies, list) and replies:
+                stack.extend(replies)
+
+        return flattened
+
     def format_comment_for_display(self, comm: Dict[str, Any]) -> str:
         """
         格式化评论为可读文本（含图片）
@@ -450,8 +485,8 @@ class CommentFetcher:
                 for idx, pic in enumerate(pictures, 1):
                     img_src = pic.get("img_src", "")
                     if img_src:
-                        # 输出Markdown格式的图片链接
-                        # 飞书会自动处理这些链接并上传
+                        # 使用Markdown图片语法，飞书会在app模式下转换为image_key
+                        # webhook模式下暂时显示为链接
                         result += f"![评论图片{idx}]({img_src})\n\n"
 
             return result
@@ -459,6 +494,169 @@ class CommentFetcher:
         except Exception as e:
             self.logger.error(f"格式化评论失败: {e}")
             return "评论格式化失败"
+
+    @staticmethod
+    def _extract_comment_payload(data: Any) -> Dict[str, Any]:
+        if isinstance(data, dict) and isinstance(data.get("data"), dict):
+            return data["data"]
+        if isinstance(data, dict):
+            return data
+        return {}
+
+    async def fetch_comment_by_rpid(
+        self,
+        oid: int,
+        type_: CommentResourceType,
+        rpid: int,
+        root_rpid: Optional[int] = None,
+        page_size: int = 20,
+    ) -> Optional[Dict[str, Any]]:
+        """按 rpid 拉取单条评论（必要时通过 root 的子评论接口查找）。"""
+        if not rpid:
+            return None
+        root = root_rpid or rpid
+
+        try:
+            root_comment = Comment(
+                oid=oid,
+                type_=type_,
+                rpid=int(root),
+                credential=self.credential,
+            )
+            response = await root_comment.get_sub_comments(
+                page_index=1,
+                page_size=page_size,
+            )
+        except Exception as exc:
+            self.logger.warning(f"获取评论失败 rpid={rpid}: {exc}")
+            return None
+
+        payload = self._extract_comment_payload(response)
+        if not payload:
+            return None
+
+        root_obj = payload.get("root")
+        if isinstance(root_obj, dict):
+            root_rpid = root_obj.get("rpid") or root_obj.get("rpid_str")
+            if root_rpid is not None and str(root_rpid) == str(rpid):
+                return root_obj
+
+        replies = payload.get("replies")
+        if not isinstance(replies, list):
+            return None
+
+        for comm in self._flatten_comment_tree(replies):
+            comm_rpid = comm.get("rpid") or comm.get("rpid_str")
+            if comm_rpid is not None and str(comm_rpid) == str(rpid):
+                return comm
+
+        return None
+
+    async def fetch_recent_comments_by_oid(
+        self,
+        oid: int,
+        type_: CommentResourceType,
+        page_index: int = 1,
+    ) -> List[Dict[str, Any]]:
+        """按时间排序拉取评论（支持动态/视频等资源）。"""
+        comment_data = await comment.get_comments(
+            oid=oid,
+            type_=type_,
+            page_index=page_index,
+            order=OrderType.TIME,
+            credential=self.credential,
+        )
+
+        payload: Any = comment_data
+        if isinstance(comment_data, dict) and isinstance(
+            comment_data.get("data"), dict
+        ):
+            payload = comment_data["data"]
+
+        if not isinstance(payload, dict):
+            return []
+
+        comments: List[Dict[str, Any]] = []
+
+        top = payload.get("top")
+        if isinstance(top, dict):
+            upper = top.get("upper")
+            if isinstance(upper, dict):
+                comments.append(upper)
+            admin = top.get("admin")
+            if isinstance(admin, dict):
+                comments.append(admin)
+            top_reply = top.get("top")
+            if isinstance(top_reply, dict):
+                comments.append(top_reply)
+
+        upper_wrap = payload.get("upper")
+        if isinstance(upper_wrap, dict):
+            top2 = upper_wrap.get("top")
+            if isinstance(top2, dict):
+                comments.append(top2)
+
+        replies = payload.get("replies")
+        if isinstance(replies, list):
+            comments.extend(replies)
+
+        return self._flatten_comment_tree(comments)
+
+    async def fetch_recent_video_comments(
+        self, bvid: str, page_index: int = 1
+    ) -> List[Dict[str, Any]]:
+        """按时间排序拉取视频评论（包含子回复）。"""
+        v = video.Video(bvid=bvid, credential=self.credential)
+        video_info = await v.get_info()
+        aid = video_info.get("aid")
+        if not aid:
+            return []
+        return await self.fetch_recent_comments_by_oid(
+            oid=int(aid),
+            type_=CommentResourceType.VIDEO,
+            page_index=page_index,
+        )
+
+    async def fetch_upper_pinned_comment(
+        self, oid: int, type_: CommentResourceType
+    ) -> Optional[Dict[str, Any]]:
+        """获取 UP 主置顶评论（如存在）。
+
+        兼容 bilibili-api-python 评论接口的两种常见返回结构：
+        - data.top.upper
+        - upper.top
+        """
+
+        comment_data = await comment.get_comments(
+            oid=oid,
+            type_=type_,
+            page_index=1,
+            order=OrderType.TIME,
+            credential=self.credential,
+        )
+
+        payload: Any = comment_data
+        if isinstance(comment_data, dict) and isinstance(
+            comment_data.get("data"), dict
+        ):
+            payload = comment_data["data"]
+
+        if not isinstance(payload, dict):
+            return None
+
+        top = payload.get("top")
+        if isinstance(top, dict):
+            upper = top.get("upper")
+            if isinstance(upper, dict):
+                return upper
+
+        upper_wrap = payload.get("upper")
+        if isinstance(upper_wrap, dict):
+            top2 = upper_wrap.get("top")
+            if isinstance(top2, dict):
+                return top2
+
+        return None
 
     def format_comments_for_feishu(
         self, comments: List[Dict[str, Any]], video_title: str, bvid: str
@@ -480,7 +678,7 @@ class CommentFetcher:
         # 构建Markdown内容
         md_content = f"## 📺 视频：{video_title}\n\n"
         md_content += f"🔗 https://www.bilibili.com/video/{bvid}\n\n"
-        md_content += f"---\n\n"
+        md_content += "---\n\n"
         md_content += f"### 🔥 精选评论 (共{len(comments)}条)\n\n"
 
         for idx, comm in enumerate(comments, 1):

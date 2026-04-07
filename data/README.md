@@ -19,12 +19,12 @@ cp bilibili_creators.json.example bilibili_creators.json
 ```json
 [
   {
-    "uid": 11473291, // B站用户ID（必需）
+    "uid": 123456, // B站用户ID（必需，示例值请替换）
     "name": "博主名称", // 显示名称（必需）
-    "platform": "bilibili", // 平台（固定为bilibili）
+    "check_interval": 300, // 检查间隔（秒），默认300秒
     "enable_comments": false, // 是否启用评论监控（可选）
-    "comment_keywords": [], // 评论关键词过滤（可选）
-    "check_interval": 300 // 检查间隔（秒），默认300秒
+    "comment_rules": [], // 评论筛选规则列表（可选，支持多规则）
+    "feishu_channel": "webhook:default" // 可选：为该博主指定推送通道（例如 webhook:alerts）
   }
 ]
 ```
@@ -32,35 +32,27 @@ cp bilibili_creators.json.example bilibili_creators.json
 **如何获取博主 UID**：
 
 1. 访问博主的 B 站主页
-2. URL 中的数字即为 UID：`https://space.bilibili.com/11473291`
+2. URL 中的数字即为 UID：`https://space.bilibili.com/123456`
 
 ### bilibili_state.json（自动生成，无需手动创建）
 
-存储动态监控的状态，记录已推送的动态 ID，避免重复推送。
+存储动态监控的运行时状态（最小化仅包含 `last_seen`），用于避免重复推送。
 
-**重要**：此文件由程序自动创建和管理，您**不需要**手动创建或修改。
+**重要**：此文件由程序自动创建和管理，属于运行时中间数据，你**不需要**手动创建或修改。
 
-**自动生成时机**：
-
-- 首次运行 `main.py --mode monitor` 时自动创建
-- 程序会自动初始化为空对象 `{}`
-- 监控到动态后自动更新
-
-**格式**：
+**格式（当前实现最小字段仅使用 last_seen）**：
 
 ```json
 {
-  "11473291": {
-    "last_seen": "最近一次推送的动态ID",
-    "seen": ["已推送的动态ID历史列表"]
+  "123456": {
+    "last_seen": "最近一次推送的动态ID"
   }
 }
 ```
 
 **重置方法**（重新推送历史动态）：
 
-- 方法 1：删除此文件，程序会自动重建
-- 方法 2：使用重置命令：`uv run python main.py --reset`
+- 使用重置命令：`uv run python main.py --reset`（会清空状态，并在下一次启动时补发近期动态）
 
 ### bilibili_auth.json（可选）
 
@@ -89,11 +81,22 @@ cp data/bilibili_creators.json.example data/bilibili_creators.json
 # 使用文本编辑器修改 bilibili_creators.json
 ```
 
+### Feishu 通道配置（可选但推荐）
+
+本项目通过 `data/feishu_channels.json` 集中管理飞书推送通道（多个命名 webhook 与可选 app）。
+
+复制示例并填写 webhook 信息：
+
+```bash
+cp data/feishu_channels.json.example data/feishu_channels.json
+```
+
+在 `webhooks` 中添加多个命名 webhook 并在 `defaults` 中设置 `content` / `alert` 的默认通道。可选地，在 `apps` 节点中添加应用机器人配置，并使用 `app:<name>` 作为通道来启用应用机器人（app 模式会在需要时懒加载 `lark-oapi`）。
+
 ### 自动生成文件（程序自动创建）
 
 以下文件会在程序首次运行时自动创建，**无需手动操作**：
 
-- ✅ `bilibili_state.json` - 动态监控状态
 - ✅ `bilibili_auth.json` - B 站认证令牌（如果配置了 refresh_token）
 
 ### 测试运行

@@ -6,5 +6,6 @@ AI视频总结服务模块
 """
 
 from .service import AISummaryService
+from .subtitle_fetcher import SubtitleErrorType
 
-__all__ = ["AISummaryService"]
+__all__ = ["AISummaryService", "SubtitleErrorType"]

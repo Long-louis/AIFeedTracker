@@ -1,0 +1,16 @@
+{
+  "defaults": {
+    "content": "webhook:default",
+    "alert": "webhook:alerts"
+  },
+  "webhooks": {
+    "default": {
+      "url": "https://open.feishu.cn/open-apis/bot/v2/hook/REPLACE_ME",
+      "secret": ""
+    },
+    "alerts": {
+      "url": "https://open.feishu.cn/open-apis/bot/v2/hook/REPLACE_ME",
+      "secret": ""
+    }
+  }
+}

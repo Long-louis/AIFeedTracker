@@ -12,13 +12,87 @@ import os
 import random
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-import aiohttp
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
+from bilibili_api import user
+from bilibili_api.comment import CommentResourceType
+
+from config import build_bilibili_credential
 
 from .bilibili_auth import BilibiliAuth
 from .comment_fetcher import CommentFetcher
+
+
+class ConfigFileWatcher:
+    """配置文件监控器，用于检测文件变化并触发热重载"""
+
+    def __init__(self, file_path: str, check_interval: int = 600):
+        """
+        初始化配置文件监控器
+
+        Args:
+            file_path: 要监控的文件路径
+            check_interval: 检查间隔（秒），默认10秒
+        """
+        self.file_path = file_path
+        self.check_interval = check_interval
+        self.logger = logging.getLogger(f"{__name__}.ConfigFileWatcher")
+        self._last_mtime: Optional[float] = None
+        self._last_content_hash: Optional[str] = None
+        self._running = False
+
+    def _get_file_info(self) -> Tuple[Optional[float], Optional[str]]:
+        """获取文件的修改时间和内容哈希"""
+        try:
+            if not os.path.exists(self.file_path):
+                return None, None
+            mtime = os.path.getmtime(self.file_path)
+            with open(self.file_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            # 使用简单的内容哈希来检测实际变化
+            content_hash = str(hash(content))
+            return mtime, content_hash
+        except Exception as e:
+            self.logger.warning(f"读取配置文件信息失败: {e}")
+            return None, None
+
+    def initialize(self) -> None:
+        """初始化文件状态（记录当前状态作为基准）"""
+        self._last_mtime, self._last_content_hash = self._get_file_info()
+        self.logger.info(f"配置文件监控已初始化: {self.file_path}")
+
+    def check_for_changes(self) -> bool:
+        """
+        检查文件是否有变化
+
+        Returns:
+            bool: 如果文件内容有变化返回 True
+        """
+        current_mtime, current_hash = self._get_file_info()
+
+        # 文件不存在或读取失败
+        if current_mtime is None:
+            return False
+
+        # 首次检查
+        if self._last_mtime is None:
+            self._last_mtime = current_mtime
+            self._last_content_hash = current_hash
+            return False
+
+        # 检查修改时间和内容哈希
+        if current_mtime != self._last_mtime or current_hash != self._last_content_hash:
+            self.logger.info(
+                f"检测到配置文件变化: mtime {self._last_mtime} -> {current_mtime}"
+            )
+            self._last_mtime = current_mtime
+            self._last_content_hash = current_hash
+            return True
+
+        return False
 
 
 @dataclass
@@ -29,16 +103,36 @@ class Creator:
     name: str
     check_interval: int = 300  # 默认5分钟
     enable_comments: bool = False  # 是否启用评论获取
-    comment_rules: List[Dict[str, Any]] = None  # 评论筛选规则列表（支持多规则）
+    comment_rules: Optional[List[Dict[str, Any]]] = (
+        None  # 评论筛选规则列表（支持多规则）
+    )
+    comment_length_min: int = 10  # 博主评论长度阈值（严格大于才推送）
+    comment_poll_interval_seconds: int = 600  # 视频/动态评论轮询间隔（秒）
+    comment_poll_window_seconds: int = 24 * 3600  # 评论轮询窗口（秒）
+    feishu_channel: Optional[str] = (
+        None  # 可选：指定此创作者消息推送通道（例如 webhook:group1）
+    )
+
+    # 可选：使用 cron 表达式（5段）定义运行时间；支持多个表达式
+    # 示例：
+    # - "*/2 10-11 * * *"  (10-11点每2分钟)
+    # - "*/2 15-16 * * *"  (15-16点每2分钟)
+    # - "0 11 * * *"       (每天11:00)
+    crons: Optional[List[str]] = None
+
+    # 可选：每次触发后增加随机延迟（秒），用于错峰与降低风控
+    jitter_seconds: int = 0
 
     def __post_init__(self):
         """初始化默认值"""
         if self.comment_rules is None:
             self.comment_rules = []
+        if self.crons is None:
+            self.crons = []
 
 
 class JsonState:
-    """JSON文件状态管理器"""
+    """JSON文件状态管理器（运行时状态，不属于用户配置）"""
 
     def __init__(self, path: str):
         self.path = path
@@ -67,20 +161,84 @@ class JsonState:
 
     def set_last_seen(self, uid: int, dynamic_id: str) -> None:
         entry = self.state.setdefault(str(uid), {})
-        entry["last_seen"] = dynamic_id
-        entry.setdefault("seen", []).append(dynamic_id)
+        entry["last_seen"] = str(dynamic_id)
+
+    def get_pinned_comment_fingerprint(
+        self, uid: int, dynamic_id: str
+    ) -> Optional[str]:
+        entry = self.state.get(str(uid), {})
+        pinned = entry.get("pinned_comments", {})
+        if not isinstance(pinned, dict):
+            return None
+        return pinned.get(str(dynamic_id))
+
+    def set_pinned_comment_fingerprint(
+        self, uid: int, dynamic_id: str, fingerprint: str
+    ) -> None:
+        entry = self.state.setdefault(str(uid), {})
+        pinned = entry.setdefault("pinned_comments", {})
+        if not isinstance(pinned, dict):
+            entry["pinned_comments"] = {}
+            pinned = entry["pinned_comments"]
+        pinned[str(dynamic_id)] = str(fingerprint)
+
+        # 控制体积：最多保留 50 条最近记录（按插入顺序淘汰最早的）
+        if len(pinned) > 50:
+            extra = len(pinned) - 50
+            for k in list(pinned.keys())[:extra]:
+                pinned.pop(k, None)
+
+    def get_comment_poll_state(
+        self, uid: int
+    ) -> Tuple[float, Dict[str, Dict[str, Any]]]:
+        entry = self.state.get(str(uid), {})
+        last_poll_ts = entry.get("comment_poll_last_ts")
+        if not isinstance(last_poll_ts, (int, float)):
+            last_poll_ts = 0.0
+        video_map = entry.get("comment_poll_videos")
+        if not isinstance(video_map, dict):
+            video_map = {}
+        return float(last_poll_ts), video_map
+
+    def set_comment_poll_state(
+        self, uid: int, last_poll_ts: float, video_map: Dict[str, Dict[str, Any]]
+    ) -> None:
+        entry = self.state.setdefault(str(uid), {})
+        entry["comment_poll_last_ts"] = float(last_poll_ts)
+        entry["comment_poll_videos"] = video_map
 
 
 class MonitorService:
     """B站动态监控服务"""
 
-    # API配置
-    BILI_SPACE_API = "https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/space"
     DYNAMIC_PC_URL = "https://t.bilibili.com/{dynamic_id}"
     VIDEO_PC_URL = "https://www.bilibili.com/video/{bvid}"
 
+    # 运行时状态文件：只用于去重/断点续跑，已在 .gitignore 忽略
     STATE_PATH = os.path.join("data", "bilibili_state.json")
     CREATORS_PATH = os.path.join("data", "bilibili_creators.json")
+
+    _SCHEDULER_TIMEZONE = "Asia/Shanghai"
+
+    # 动态基础信息里的 comment_type -> bilibili-api-python CommentResourceType
+    _COMMENT_TYPE_TO_RESOURCE: Dict[int, CommentResourceType] = {
+        1: CommentResourceType.VIDEO,
+        11: CommentResourceType.DYNAMIC_DRAW,
+        17: CommentResourceType.DYNAMIC,
+    }
+
+    # 凭证刷新间隔（秒）：每6小时检查一次
+    _CREDENTIAL_REFRESH_INTERVAL = 6 * 3600
+
+    # 二维码提醒间隔（秒）：避免重复刷屏
+    _QR_NOTIFY_INTERVAL = 10 * 60
+
+    # 夜间静默时段：避免在休息时间反复推送已过期二维码
+    _QR_QUIET_HOURS_START = 23
+    _QR_QUIET_HOURS_END = 8
+
+    # 评论轮询最多翻页数：避免高流量动态过度请求
+    _COMMENT_POLL_MAX_PAGES = 3
 
     def __init__(self, feishu_bot=None, summarizer=None, cookie: Optional[str] = None):
         """
@@ -89,46 +247,178 @@ class MonitorService:
         Args:
             feishu_bot: 飞书机器人实例
             summarizer: AI总结服务实例
-            cookie: B站Cookie
+            cookie: 兼容旧参数（已不再使用，凭证改由 bilibili-api-python 管理）
         """
         self.feishu_bot = feishu_bot
         self.summarizer = summarizer
         self.cookie = cookie
-        self.state = JsonState(self.STATE_PATH)
         self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
 
-        # 初始化B站认证管理
-        self.bili_auth = BilibiliAuth()
+        self.state = JsonState(self.STATE_PATH)
+
+        # 是否允许在启动/首次缺少 last_seen 时补发（默认关闭：避免重启刷屏）
+        self._allow_backfill_on_start = False
+
+        # 创建统一凭证（依赖 config.py 中的环境变量）
+        self.credential = build_bilibili_credential()
+
+        # 上次凭证刷新时间
+        self._last_credential_refresh: float = 0
 
         # 初始化评论获取服务
         self.comment_fetcher = None
         self._init_comment_fetcher()
 
+        # B站认证工具（二维码登录）
+        self.auth = BilibiliAuth()
+
     def _init_comment_fetcher(self) -> None:
         """初始化评论获取服务"""
         try:
-            from bilibili_api import Credential
-
-            from config import BILIBILI_CONFIG
-
-            # 创建凭证（bilibili-api-python会自动处理WBI签名！）
-            credential = None
-            if BILIBILI_CONFIG.get("SESSDATA"):
-                credential = Credential(
-                    sessdata=BILIBILI_CONFIG.get("SESSDATA"),
-                    bili_jct=BILIBILI_CONFIG.get("bili_jct"),
-                    buvid3=BILIBILI_CONFIG.get("buvid3"),
-                )
-                self.logger.info("B站凭证创建成功（WBI签名将自动处理）")
-            else:
+            if not self.credential:
                 self.logger.warning("未配置SESSDATA，评论获取功能可能受限")
-
-            self.comment_fetcher = CommentFetcher(credential=credential)
+            self.comment_fetcher = CommentFetcher(credential=self.credential)
             self.logger.info("评论获取服务初始化成功")
-
         except Exception as e:
             self.logger.warning(f"评论获取服务初始化失败: {e}")
             self.comment_fetcher = None
+
+    async def _check_and_refresh_credential(self) -> bool:
+        """检查并刷新凭证（如果需要）
+
+        静默刷新，不发送通知。只在日志中记录。
+
+        Returns:
+            bool: 凭证是否有效
+        """
+        if not self.credential:
+            await self._notify_qr_login_needed("未配置或已失效")
+            return False
+
+        current_time = time.time()
+
+        # 如果距离上次刷新不足间隔时间，跳过检查
+        if (
+            current_time - self._last_credential_refresh
+            < self._CREDENTIAL_REFRESH_INTERVAL
+        ):
+            return True
+
+        try:
+            # 检查是否需要刷新（即将过期）
+            need_refresh = await self.credential.check_refresh()
+
+            if need_refresh:
+                self.logger.info("凭证即将过期，开始刷新...")
+                await self.credential.refresh()
+                self.logger.info("凭证刷新成功")
+
+            self._last_credential_refresh = current_time
+            return True
+
+        except Exception as e:
+            self.logger.warning(f"凭证刷新失败: {e}")
+            await self._notify_qr_login_needed("凭证刷新失败")
+            # 不发送通知，等获取动态失败时自然会知道
+            return False
+
+    def _refresh_runtime_credential(self) -> None:
+        """从 bilibili_auth.json 重新加载凭证并应用到运行时"""
+        # 重新加载认证数据并应用到环境变量和 BILIBILI_CONFIG
+        from config import apply_bilibili_config
+
+        auth_data = self.auth._load_auth_data()
+        if auth_data:
+            apply_bilibili_config(auth_data)
+
+        # 重建 Credential 对象
+        self.credential = build_bilibili_credential()
+        if not self.credential:
+            self.logger.warning("重新加载凭证后仍未能构建有效 Credential")
+            return
+
+        self.logger.info("运行时凭证已更新")
+
+        # 更新依赖服务的凭证
+        if self.comment_fetcher:
+            self.comment_fetcher.credential = self.credential
+        if self.summarizer and hasattr(self.summarizer, "subtitle_fetcher"):
+            self.summarizer.subtitle_fetcher.credential = self.credential
+
+    def _get_current_local_hour(self) -> int:
+        return datetime.now().hour
+
+    def _is_qr_quiet_hours(self) -> bool:
+        hour = self._get_current_local_hour()
+        return hour >= self._QR_QUIET_HOURS_START or hour < self._QR_QUIET_HOURS_END
+
+    async def _dispatch_qr_login_notification(self, reason: str) -> None:
+        if not self.feishu_bot:
+            return
+
+        if not self.auth.has_active_qr_login():
+            qr_path = await self.auth.start_qr_login()
+        else:
+            qr_path = str(self.auth.QR_CODE_PATH)
+
+        image_key = await self.feishu_bot.upload_local_image(qr_path)
+
+        content = "检测到B站登录已失效，需要扫码重新登录。"
+        if reason:
+            content += f"\n\n**原因**: {reason}"
+        if image_key:
+            content += f"\n\n![B站登录二维码]({image_key})"
+        else:
+            content += f"\n\n二维码文件: {qr_path}"
+            content += "\n\n⚠️ 未配置飞书应用凭证，无法上传图片。"
+
+        await self.feishu_bot.send_system_notification(
+            self.feishu_bot.LEVEL_WARNING,
+            "B站登录过期，需要扫码",
+            content,
+        )
+
+    async def _notify_qr_login_needed(self, reason: str, force: bool = False) -> None:
+        if self._is_qr_quiet_hours():
+            self.auth.set_qr_pending_notify_reason(reason)
+            return
+
+        now_ts = time.time()
+        last_notify = self.auth.get_qr_last_notify_ts()
+        if not force and now_ts - last_notify < self._QR_NOTIFY_INTERVAL:
+            return
+
+        await self._dispatch_qr_login_notification(reason)
+        self.auth.clear_qr_pending_notify_reason()
+        self.auth.set_qr_last_notify_ts(now_ts)
+
+    async def _poll_qr_login_status(self) -> None:
+        pending_reason = self.auth.get_qr_pending_notify_reason()
+        if pending_reason and not self._is_qr_quiet_hours():
+            await self._notify_qr_login_needed(pending_reason, force=True)
+            return
+
+        if not self.auth.has_active_qr_login():
+            return
+
+        state, values = await self.auth.poll_qr_login()
+        if state == "pending":
+            return
+
+        if state == "timeout":
+            await self._notify_qr_login_needed("二维码已过期，请重新扫码", force=True)
+            return
+
+        if state == "done" and values:
+            self.auth.set_credential_values(values)
+            self.auth.clear_qr_pending_notify_reason()
+            self._refresh_runtime_credential()
+            if self.feishu_bot:
+                await self.feishu_bot.send_system_notification(
+                    self.feishu_bot.LEVEL_INFO,
+                    "B站登录更新成功",
+                    "已完成扫码登录，凭证已自动更新。",
+                )
 
     @staticmethod
     def get_publish_time(item: Dict[str, Any]) -> str:
@@ -142,7 +432,9 @@ class MonitorService:
             if author and isinstance(author, dict):
                 pub_ts = author.get("pub_ts")
                 if pub_ts:
-                    dt = datetime.fromtimestamp(pub_ts)
+                    dt = datetime.fromtimestamp(
+                        int(pub_ts), tz=timezone(timedelta(hours=8))
+                    )
                     return f"发布时间：{dt.strftime('%Y-%m-%d %H:%M:%S')}"
 
                 pub_time = author.get("pub_time")
@@ -211,8 +503,37 @@ class MonitorService:
             if major and isinstance(major, dict):
                 major_type = major.get("type", "")
 
+                # 处理直播通知/直播推荐（常见：开播提醒）
+                if major_type in (
+                    "MAJOR_TYPE_LIVE_RCMD",
+                    "MAJOR_TYPE_LIVE",
+                    "live_rcmd",
+                    "LIVE_RCMD",
+                ) or (
+                    "live_rcmd" in major and isinstance(major.get("live_rcmd"), dict)
+                ):
+                    live = major.get("live_rcmd") or major.get("live")
+                    if live and isinstance(live, dict):
+                        title = live.get("title") or live.get("room_title")
+                        if title and isinstance(title, str):
+                            text_parts.append(f"**📺 开播通知：{title.strip()}**\n")
+                        else:
+                            text_parts.append("**📺 开播通知**\n")
+
+                        uname = live.get("uname") or live.get("user_name")
+                        if uname and isinstance(uname, str):
+                            text_parts.append(f"主播：{uname.strip()}\n")
+
+                        jump_url = live.get("jump_url") or live.get("link")
+                        if jump_url and isinstance(jump_url, str):
+                            text_parts.append(f"[进入直播间]({jump_url})")
+
+                        cover = live.get("cover") or live.get("cover_url")
+                        if cover and isinstance(cover, str):
+                            image_urls.append(cover)
+
                 # 处理OPUS类型动态（图文混排）
-                if major_type == "MAJOR_TYPE_OPUS":
+                elif major_type == "MAJOR_TYPE_OPUS":
                     opus = major.get("opus")
                     if opus and isinstance(opus, dict):
                         title = opus.get("title")
@@ -243,6 +564,87 @@ class MonitorService:
                                 src = item_data.get("src")
                                 if src:
                                     image_urls.append(src)
+
+                # 处理视频/投稿类动态（archive）
+                elif major_type in ("MAJOR_TYPE_ARCHIVE", "archive"):
+                    archive = major.get("archive", {})
+                    if archive and isinstance(archive, dict):
+                        title = archive.get("title")
+                        if title and isinstance(title, str):
+                            text_parts.append(f"**{title.strip()}**\n")
+                        jump_url = archive.get("jump_url") or archive.get("url")
+                        if jump_url and isinstance(jump_url, str):
+                            text_parts.append(f"[查看视频]({jump_url})")
+                        cover = archive.get("cover")
+                        if cover and isinstance(cover, str):
+                            image_urls.append(cover)
+
+                # 处理文章/专栏
+                elif major_type in ("MAJOR_TYPE_ARTICLE", "ARTICLE", "article") or (
+                    "article" in major and isinstance(major.get("article"), dict)
+                ):
+                    article = major.get("article")
+                    if article and isinstance(article, dict):
+                        title = article.get("title")
+                        if title and isinstance(title, str):
+                            text_parts.append(f"**📰 {title.strip()}**\n")
+                        desc = article.get("desc") or article.get("summary")
+                        if desc and isinstance(desc, str):
+                            text_parts.append(desc.strip())
+                        jump_url = article.get("jump_url") or article.get("url")
+                        if jump_url and isinstance(jump_url, str):
+                            text_parts.append(f"\n[查看文章]({jump_url})")
+                        cover = article.get("covers")
+                        if (
+                            isinstance(cover, list)
+                            and cover
+                            and isinstance(cover[0], str)
+                        ):
+                            image_urls.append(cover[0])
+
+                # 处理番剧/PGC
+                elif major_type in ("MAJOR_TYPE_PGC", "PGC", "pgc") or (
+                    "pgc" in major and isinstance(major.get("pgc"), dict)
+                ):
+                    pgc = major.get("pgc")
+                    if pgc and isinstance(pgc, dict):
+                        title = pgc.get("title")
+                        if title and isinstance(title, str):
+                            text_parts.append(f"**🎬 {title.strip()}**\n")
+                        desc = pgc.get("desc")
+                        if desc and isinstance(desc, str):
+                            text_parts.append(desc.strip())
+                        jump_url = pgc.get("jump_url") or pgc.get("url")
+                        if jump_url and isinstance(jump_url, str):
+                            text_parts.append(f"\n[查看详情]({jump_url})")
+                        cover = pgc.get("cover")
+                        if cover and isinstance(cover, str):
+                            image_urls.append(cover)
+
+                # 其他带卡片的动态类型：尽量从 major 子结构抽取 title/jump_url/cover
+                # 用于兜底覆盖：直播预约卡片、合集、音乐、商品等（结构通常包含 title/jump_url/cover）
+                if not text_parts:
+                    for key in (
+                        "live_rcmd",
+                        "live",
+                        "ugc_season",
+                        "common",
+                        "music",
+                        "goods",
+                        "reserve",
+                    ):
+                        card = major.get(key)
+                        if isinstance(card, dict):
+                            title = card.get("title")
+                            if isinstance(title, str) and title.strip():
+                                text_parts.append(f"**{title.strip()}**\n")
+                            jump_url = card.get("jump_url") or card.get("url")
+                            if isinstance(jump_url, str) and jump_url.strip():
+                                text_parts.append(f"[查看详情]({jump_url.strip()})")
+                            cover = card.get("cover")
+                            if isinstance(cover, str) and cover.strip():
+                                image_urls.append(cover.strip())
+                            break
 
             # 如果major中没有文本，尝试从desc中获取
             if not text_parts:
@@ -281,6 +683,634 @@ class MonitorService:
             return ""
 
     @staticmethod
+    def _collect_badge_texts(obj: Any) -> List[str]:
+        texts: List[str] = []
+        if isinstance(obj, dict):
+            badge = obj.get("badge")
+            if isinstance(badge, dict):
+                t = badge.get("text")
+                if isinstance(t, str) and t:
+                    texts.append(t)
+
+            for v in obj.values():
+                texts.extend(MonitorService._collect_badge_texts(v))
+
+        elif isinstance(obj, list):
+            for v in obj:
+                texts.extend(MonitorService._collect_badge_texts(v))
+
+        return texts
+
+    @staticmethod
+    def is_charge_dynamic(item: Dict[str, Any]) -> bool:
+        """判断是否为“充电/充电专属/onlyfans”动态。
+
+        依据 deepwiki 对 bilibili-api-python 的说明：优先检查动态结构中的 badge 文本与 onlyfans 字段。
+        """
+
+        # 0) 优先检查 basic 层级的充电/粉丝专属标记（最直接）
+        basic = item.get("basic", {})
+        if isinstance(basic, dict):
+            for key, val in basic.items():
+                key_l = str(key).lower()
+                if any(
+                    x in key_l for x in ("onlyfans", "charge", "upower", "fans_only")
+                ):
+                    if val is True:
+                        return True
+                    if isinstance(val, str) and val:
+                        return True
+
+        modules = item.get("modules", {})
+        if not isinstance(modules, dict):
+            return False
+
+        dynamic = modules.get("module_dynamic", {})
+        if not isinstance(dynamic, dict):
+            return False
+
+        # 1) additional.type 里包含 onlyfans/charge/upower 等
+        additional = dynamic.get("additional")
+        if isinstance(additional, dict):
+            t = additional.get("type")
+            if isinstance(t, str):
+                tl = t.lower()
+                if "onlyfans" in tl or "charge" in tl or "upower" in tl:
+                    return True
+            # 部分结构可能直接给 onlyfans 字段
+            if "onlyfans" in additional:
+                return True
+
+        major = dynamic.get("major")
+        if isinstance(major, dict):
+            mt = major.get("type")
+            if isinstance(mt, str):
+                mtl = mt.lower()
+                if "onlyfans" in mtl or "charge" in mtl or "upower" in mtl:
+                    return True
+
+        # 2) 扫描 major/opus/archive 等的 badge.text 是否含“充电”
+        badge_texts = MonitorService._collect_badge_texts(dynamic)
+        if any(("充电" in t) for t in badge_texts):
+            return True
+
+        # 3) 兜底：扫描整个 item 的 badge
+        all_badges = MonitorService._collect_badge_texts(item)
+        return any(("充电" in t) for t in all_badges)
+
+    def _get_comment_thread_info(
+        self, item: Dict[str, Any]
+    ) -> Optional[Tuple[int, CommentResourceType]]:
+        basic = item.get("basic", {})
+        if not isinstance(basic, dict):
+            return None
+
+        oid_str = basic.get("comment_id_str") or basic.get("rid_str")
+        if not oid_str or not isinstance(oid_str, str) or not oid_str.isdigit():
+            return None
+
+        ct = basic.get("comment_type")
+        if isinstance(ct, str):
+            if not ct.isdigit():
+                return None
+            ct_int = int(ct)
+        elif isinstance(ct, int):
+            ct_int = ct
+        else:
+            return None
+
+        resource = self._COMMENT_TYPE_TO_RESOURCE.get(ct_int)
+        if resource is None:
+            return None
+
+        return int(oid_str), resource
+
+    def _pinned_comment_fingerprint(self, pinned: Optional[Dict[str, Any]]) -> str:
+        if not pinned or not isinstance(pinned, dict):
+            return ""
+        rpid = pinned.get("rpid")
+        if rpid is None:
+            rpid = pinned.get("rpid_str")
+        if rpid is None:
+            return ""
+        return str(rpid)
+
+    async def _check_recent_pinned_comments(
+        self, creator: Creator, items: List[Dict[str, Any]]
+    ) -> None:
+        """检查近期动态是否出现新的置顶评论。"""
+
+        if not self.comment_fetcher:
+            return
+
+        # 方案 A：enable_comments 同时控制置顶评论监控与视频精选评论
+        if not creator.enable_comments:
+            return
+
+        current_time = time.time()
+        earliest_allowed_timestamp = current_time - 48 * 3600
+
+        candidates: List[Dict[str, Any]] = []
+        for it in items:
+            ts = self.get_publish_timestamp(it)
+            if ts and ts >= earliest_allowed_timestamp:
+                candidates.append(it)
+                if len(candidates) >= 5:
+                    break
+
+        if not candidates:
+            return
+
+        changed = False
+
+        for it in candidates:
+            dynamic_id = str(it.get("id_str") or it.get("id"))
+            if not dynamic_id:
+                continue
+
+            thread = self._get_comment_thread_info(it)
+            if thread is None:
+                continue
+
+            oid, resource = thread
+            pinned = await self.comment_fetcher.fetch_upper_pinned_comment(
+                oid=oid, type_=resource
+            )
+            fp = self._pinned_comment_fingerprint(pinned)
+            prev = self.state.get_pinned_comment_fingerprint(creator.uid, dynamic_id)
+
+            # 首次见到该动态：只初始化，不推送（避免重启刷屏）
+            if prev is None:
+                self.state.set_pinned_comment_fingerprint(creator.uid, dynamic_id, fp)
+                changed = True
+                continue
+
+            # 出现新的置顶评论：prev 为空，fp 非空；或 rpid 发生变化
+            if fp and fp != prev:
+                if pinned is None:
+                    continue
+                await self._push_pinned_comment_update(
+                    creator=creator,
+                    item=it,
+                    pinned_comment=pinned,
+                )
+                self.state.set_pinned_comment_fingerprint(creator.uid, dynamic_id, fp)
+                changed = True
+                continue
+
+            # 置顶被取消/清空：只更新状态，不推送
+            if (not fp) and fp != prev:
+                self.state.set_pinned_comment_fingerprint(creator.uid, dynamic_id, fp)
+                changed = True
+
+        if changed:
+            self.state.save()
+
+    @staticmethod
+    def _format_comment_poll_key(oid: int, type_: CommentResourceType) -> str:
+        if isinstance(type_, CommentResourceType):
+            type_value = type_.value
+        else:
+            type_value = int(type_)
+        return f"{oid}:{int(type_value)}"
+
+    @staticmethod
+    def _safe_comment_message(comm: Dict[str, Any]) -> str:
+        content_obj = comm.get("content", {})
+        if not isinstance(content_obj, dict):
+            return ""
+        message = content_obj.get("message", "")
+        if not isinstance(message, str):
+            return ""
+        return message
+
+    @staticmethod
+    def _get_comment_author_uid(comm: Dict[str, Any]) -> Optional[int]:
+        member = comm.get("member", {})
+        if not isinstance(member, dict):
+            return None
+        mid = member.get("mid")
+        if isinstance(mid, int):
+            return mid
+        if isinstance(mid, str) and mid.isdigit():
+            return int(mid)
+        return None
+
+    def _is_creator_comment(self, comm: Dict[str, Any], creator_uid: int) -> bool:
+        mid = self._get_comment_author_uid(comm)
+        if mid is None:
+            return False
+        return mid == int(creator_uid)
+
+    async def _poll_creator_comments(
+        self, creator: Creator, items: List[Dict[str, Any]]
+    ) -> None:
+        """轮询最新动态/视频的评论区，推送博主新评论。"""
+
+        if not creator.enable_comments:
+            return
+
+        if not self.comment_fetcher:
+            return
+
+        now_ts = time.time()
+        last_poll_ts, video_map = self.state.get_comment_poll_state(creator.uid)
+        if now_ts - last_poll_ts < creator.comment_poll_interval_seconds:
+            return
+
+        earliest_allowed_timestamp = now_ts - creator.comment_poll_window_seconds
+
+        candidates: List[Dict[str, Any]] = []
+        for it in items:
+            ts = self.get_publish_timestamp(it)
+            if ts and ts >= earliest_allowed_timestamp:
+                candidates.append(it)
+                if len(candidates) >= 5:
+                    break
+
+        if not candidates:
+            self.state.set_comment_poll_state(creator.uid, now_ts, video_map)
+            self.state.save()
+            return
+
+        pushed = False
+
+        for it in candidates:
+            dynamic_id = str(it.get("id_str") or it.get("id"))
+            if not dynamic_id:
+                continue
+
+            thread = self._get_comment_thread_info(it)
+            if thread is None:
+                continue
+
+            oid, resource = thread
+            key = self._format_comment_poll_key(oid, resource)
+            entry = video_map.get(key, {})
+            last_seen_rpid = entry.get("last_seen_rpid")
+            if last_seen_rpid is not None:
+                last_seen_rpid = str(last_seen_rpid)
+            last_seen_ctime = entry.get("last_seen_ctime")
+            if not isinstance(last_seen_ctime, (int, float)):
+                last_seen_ctime = 0
+
+            def _rpid_str(comm: Dict[str, Any]) -> str:
+                rpid = comm.get("rpid")
+                if rpid is None:
+                    rpid = comm.get("rpid_str")
+                return str(rpid) if rpid is not None else ""
+
+            def _rpid_int(rpid_str: str) -> Optional[int]:
+                return int(rpid_str) if rpid_str.isdigit() else None
+
+            def _ctime(comm: Dict[str, Any]) -> int:
+                return int(comm.get("ctime", 0) or 0)
+
+            def _parent_rpid_str(comm: Dict[str, Any]) -> str:
+                current_rpid = _rpid_str(comm)
+                for key in ("parent", "root"):
+                    value = comm.get(key)
+                    if value is None:
+                        continue
+                    value_str = str(value)
+                    if not value_str.isdigit():
+                        continue
+                    if current_rpid and value_str == current_rpid:
+                        continue
+                    if value_str == "0":
+                        continue
+                    return value_str
+                return ""
+
+            def _root_rpid_str(comm: Dict[str, Any]) -> str:
+                value = comm.get("root")
+                if value is None:
+                    return ""
+                value_str = str(value)
+                if not value_str.isdigit() or value_str == "0":
+                    return ""
+                return value_str
+
+            comments: List[Dict[str, Any]] = []
+            seen_rpids: set[str] = set()
+            for page_index in range(1, self._COMMENT_POLL_MAX_PAGES + 1):
+                page_comments = await self.comment_fetcher.fetch_recent_comments_by_oid(
+                    oid=oid,
+                    type_=resource,
+                    page_index=page_index,
+                )
+                if not page_comments:
+                    break
+                # 去重：置顶评论会在每一页重复出现
+                for comm in page_comments:
+                    rpid = _rpid_str(comm)
+                    if rpid and rpid not in seen_rpids:
+                        seen_rpids.add(rpid)
+                        comments.append(comm)
+
+                if last_seen_ctime:
+                    page_max_ctime = max((_ctime(c) for c in page_comments), default=0)
+                    if page_max_ctime <= last_seen_ctime:
+                        break
+
+            if not comments:
+                continue
+
+            comments.sort(key=lambda c: int(c.get("ctime", 0) or 0))
+
+            comment_by_rpid: Dict[str, Dict[str, Any]] = {}
+            for comm in comments:
+                rpid_str = _rpid_str(comm)
+                if rpid_str:
+                    comment_by_rpid.setdefault(rpid_str, comm)
+
+            parent_cache: Dict[str, Dict[str, Any]] = {}
+
+            newest_comment = max(comments, key=_ctime)
+            newest_rpid = _rpid_str(newest_comment)
+            newest_ctime = _ctime(newest_comment)
+
+            if last_seen_rpid is None and last_seen_ctime <= 0:
+                if newest_rpid:
+                    entry["last_seen_rpid"] = newest_rpid
+                if newest_ctime:
+                    entry["last_seen_ctime"] = newest_ctime
+                video_map[key] = entry
+                continue
+
+            new_comments: List[Dict[str, Any]] = []
+            for comm in comments:
+                rpid_str = _rpid_str(comm)
+                if not rpid_str:
+                    continue
+                comm_ctime = _ctime(comm)
+                if last_seen_rpid is not None and rpid_str == last_seen_rpid:
+                    continue
+                if last_seen_ctime and comm_ctime < last_seen_ctime:
+                    continue
+                if last_seen_ctime and comm_ctime == last_seen_ctime:
+                    comm_rpid_int = _rpid_int(rpid_str)
+                    last_rpid_int = _rpid_int(last_seen_rpid or "")
+                    if comm_rpid_int is None or last_rpid_int is None:
+                        continue
+                    if comm_rpid_int <= last_rpid_int:
+                        continue
+                new_comments.append(comm)
+
+            if not new_comments:
+                if newest_rpid:
+                    entry["last_seen_rpid"] = newest_rpid
+                if newest_ctime:
+                    entry["last_seen_ctime"] = newest_ctime
+                video_map[key] = entry
+                continue
+
+            creator_comments = []
+            for comm in new_comments:
+                if not self._is_creator_comment(comm, creator.uid):
+                    continue
+                message = self._safe_comment_message(comm)
+                if len(message) <= int(creator.comment_length_min):
+                    continue
+                creator_comments.append(comm)
+
+            if not creator_comments:
+                if newest_rpid:
+                    entry["last_seen_rpid"] = newest_rpid
+                if newest_ctime:
+                    entry["last_seen_ctime"] = newest_ctime
+                video_map[key] = entry
+                continue
+
+            title = "（无文本内容）"
+            vinfo = self.extract_video_info(it)
+            if vinfo:
+                _, video_title = vinfo
+                if video_title:
+                    title = video_title
+            else:
+                text = self.parse_text_from_item(it)
+                if text:
+                    title = text.split("\n", 1)[0].strip() or title
+
+            url = self.DYNAMIC_PC_URL.format(dynamic_id=dynamic_id)
+
+            comment_section = "---\n\n### 💬 博主新评论\n\n"
+            comment_section += f"**动态**: {title}\n\n"
+            comment_section += f"🔗 [查看原动态]({url})\n\n"
+            comment_section += "---\n\n"
+
+            for idx, comm in enumerate(creator_comments, 1):
+                comment_text = self.comment_fetcher.format_comment_for_display(comm)
+                reply_context = ""
+                parent_rpid = _parent_rpid_str(comm)
+                if parent_rpid:
+                    parent_comm = comment_by_rpid.get(parent_rpid) or parent_cache.get(
+                        parent_rpid
+                    )
+                    if parent_comm:
+                        parent_text = self.comment_fetcher.format_comment_for_display(
+                            parent_comm
+                        )
+                        reply_context = f"**回复对象:**\n\n{parent_text}\n\n"
+                    else:
+                        root_rpid = _root_rpid_str(comm)
+                        if self.comment_fetcher:
+                            parent_obj = (
+                                await self.comment_fetcher.fetch_comment_by_rpid(
+                                    oid=oid,
+                                    type_=resource,
+                                    rpid=int(parent_rpid),
+                                    root_rpid=int(root_rpid) if root_rpid else None,
+                                )
+                            )
+                            if parent_obj:
+                                parent_cache[parent_rpid] = parent_obj
+                                parent_text = (
+                                    self.comment_fetcher.format_comment_for_display(
+                                        parent_obj
+                                    )
+                                )
+                                reply_context = f"**回复对象:**\n\n{parent_text}\n\n"
+                            else:
+                                reply_context = "**回复对象:**（未能获取原评论）\n\n"
+                        else:
+                            reply_context = "**回复对象:**（未能获取原评论）\n\n"
+
+                if reply_context:
+                    comment_section += reply_context
+                comment_section += f"**评论 {idx}:**\n\n{comment_text}\n\n"
+
+            if self.feishu_bot:
+                await self.feishu_bot.send_card_message(
+                    creator.name,
+                    "哔哩哔哩",
+                    comment_section,
+                    channel=creator.feishu_channel,
+                    addition_title="博主新评论",
+                )
+                pushed = True
+
+            if newest_rpid:
+                entry["last_seen_rpid"] = newest_rpid
+            if newest_ctime:
+                entry["last_seen_ctime"] = newest_ctime
+            video_map[key] = entry
+
+        self.state.set_comment_poll_state(creator.uid, now_ts, video_map)
+        self.state.save()
+
+    async def _push_pinned_comment_update(
+        self, creator: Creator, item: Dict[str, Any], pinned_comment: Dict[str, Any]
+    ) -> None:
+        if not self.feishu_bot or not self.comment_fetcher:
+            return
+
+        did = str(item.get("id_str") or item.get("id"))
+        url = self.DYNAMIC_PC_URL.format(dynamic_id=did)
+
+        title = "（无文本内容）"
+        vinfo = self.extract_video_info(item)
+        if vinfo:
+            _, video_title = vinfo
+            if video_title:
+                title = video_title
+        else:
+            text = self.parse_text_from_item(item)
+            if text:
+                title = text.split("\n", 1)[0].strip() or title
+
+        pinned_md = self.comment_fetcher.format_comment_for_display(pinned_comment)
+
+        charge_tag = ""
+        if self.is_charge_dynamic(item):
+            charge_tag = "【充电】"
+
+        markdown_content = (
+            f"**{charge_tag}动态：** {title}\n\n"
+            f"---\n\n{pinned_md}\n\n---\n\n"
+            f"[查看原动态]({url})"
+        )
+
+        await self.feishu_bot.send_card_message(
+            creator.name,
+            "哔哩哔哩",
+            markdown_content,
+            channel=creator.feishu_channel,
+            addition_title="置顶评论更新",
+        )
+
+    @staticmethod
+    def _parse_orig_dynamic(item: Dict[str, Any]) -> Optional[str]:
+        """解析转发动态中的原动态内容
+
+        转发动态的结构：item["orig"] 包含被转发的原动态
+        """
+        orig = item.get("orig")
+        if not orig or not isinstance(orig, dict):
+            return None
+
+        result_parts = []
+
+        # 获取原动态作者
+        orig_modules = orig.get("modules", {})
+        if orig_modules:
+            author = orig_modules.get("module_author", {})
+            if author and isinstance(author, dict):
+                name = author.get("name")
+                if name:
+                    result_parts.append(f"**@{name}**")
+
+        # 获取原动态的动态ID用于生成链接
+        orig_id = orig.get("id_str") or orig.get("id")
+
+        # 解析原动态内容
+        orig_dynamic = orig_modules.get("module_dynamic", {})
+        if orig_dynamic and isinstance(orig_dynamic, dict):
+            # 尝试从 desc 获取文本
+            desc = orig_dynamic.get("desc")
+            if desc and isinstance(desc, dict):
+                text = desc.get("text")
+                if text and isinstance(text, str):
+                    result_parts.append(text.strip())
+
+            # 尝试从 major 获取内容（视频/文章等）
+            major = orig_dynamic.get("major")
+            if major and isinstance(major, dict):
+                major_type = major.get("type", "")
+
+                # 视频
+                if major_type in ("MAJOR_TYPE_ARCHIVE", "archive"):
+                    archive = major.get("archive", {})
+                    if archive:
+                        title = archive.get("title")
+                        if title:
+                            result_parts.append(f"📺 **{title}**")
+                        bvid = archive.get("bvid")
+                        if bvid:
+                            video_url = f"https://www.bilibili.com/video/{bvid}"
+                            result_parts.append(f"[查看视频]({video_url})")
+
+                # 文章
+                elif major_type in ("MAJOR_TYPE_ARTICLE", "article"):
+                    article = major.get("article", {})
+                    if article:
+                        title = article.get("title")
+                        if title:
+                            result_parts.append(f"📰 **{title}**")
+                        jump_url = article.get("jump_url")
+                        if jump_url:
+                            if jump_url.startswith("//"):
+                                jump_url = "https:" + jump_url
+                            result_parts.append(f"[查看文章]({jump_url})")
+
+                # OPUS 图文
+                elif major_type == "MAJOR_TYPE_OPUS":
+                    opus = major.get("opus", {})
+                    if opus:
+                        title = opus.get("title")
+                        if title:
+                            result_parts.append(f"**{title}**")
+                        summary = opus.get("summary", {})
+                        if summary:
+                            text = summary.get("text")
+                            if text:
+                                result_parts.append(text.strip())
+
+                # 直播
+                elif major_type in ("MAJOR_TYPE_LIVE_RCMD", "MAJOR_TYPE_LIVE"):
+                    live = major.get("live_rcmd") or major.get("live", {})
+                    if live:
+                        title = live.get("title") or live.get("room_title")
+                        if title:
+                            result_parts.append(f"📺 **直播：{title}**")
+                        jump_url = live.get("jump_url") or live.get("link")
+                        if jump_url:
+                            result_parts.append(f"[进入直播间]({jump_url})")
+
+                # 通用卡片类型兜底
+                if not any("查看" in p or "进入" in p for p in result_parts):
+                    for key in ("common", "ugc_season", "music", "pgc"):
+                        card = major.get(key)
+                        if isinstance(card, dict):
+                            title = card.get("title")
+                            if title:
+                                result_parts.append(f"**{title}**")
+                            jump_url = card.get("jump_url") or card.get("url")
+                            if jump_url:
+                                if jump_url.startswith("//"):
+                                    jump_url = "https:" + jump_url
+                                result_parts.append(f"[查看详情]({jump_url})")
+                            break
+
+        # 添加原动态链接
+        if orig_id:
+            orig_url = f"https://t.bilibili.com/{orig_id}"
+            result_parts.append(f"[查看原动态]({orig_url})")
+
+        return "\n".join(result_parts) if result_parts else None
+
+    @staticmethod
     def extract_video_info(item: Dict[str, Any]) -> Optional[Tuple[str, str]]:
         """从动态项提取视频信息"""
         dynamic = item.get("modules", {}).get("module_dynamic", {})
@@ -295,80 +1325,189 @@ class MonitorService:
                 return bvid, title
         return None
 
+    def _render_dynamic_message(self, item: Dict[str, Any]) -> Dict[str, str]:
+        render_type = self._classify_dynamic_render_type(item)
+        if render_type == "video":
+            return self._render_video_dynamic_message(item)
+        if render_type == "opus":
+            return self._render_opus_dynamic_message(item)
+        if render_type == "live":
+            return self._render_live_dynamic_message(item)
+        if render_type == "text":
+            return self._render_text_dynamic_message(item)
+        return self._render_fallback_dynamic_message(item)
+
+    def _classify_dynamic_render_type(self, item: Dict[str, Any]) -> str:
+        vinfo = self.extract_video_info(item)
+        if vinfo:
+            return "video"
+
+        major = item.get("modules", {}).get("module_dynamic", {}).get("major")
+        if isinstance(major, dict):
+            major_type = major.get("type")
+            if major_type == "MAJOR_TYPE_OPUS" or major_type == "MAJOR_TYPE_DRAW":
+                return "opus"
+            if major_type in ("MAJOR_TYPE_LIVE_RCMD", "MAJOR_TYPE_LIVE", "live_rcmd"):
+                return "live"
+            if isinstance(major.get("live_rcmd") or major.get("live"), dict):
+                return "live"
+            for key in ("common", "ugc_season", "music", "goods", "reserve"):
+                card = major.get(key)
+                if isinstance(card, dict) and (
+                    (isinstance(card.get("title"), str) and card.get("title").strip())
+                    or (
+                        isinstance(card.get("jump_url") or card.get("url"), str)
+                        and (card.get("jump_url") or card.get("url")).strip()
+                    )
+                ):
+                    return "fallback"
+
+        if self.parse_text_from_item(item).strip() or self._parse_orig_dynamic(item):
+            return "text"
+        if self.is_charge_dynamic(item):
+            return "text"
+        return "fallback"
+
+    def _dynamic_url(self, item: Dict[str, Any]) -> str:
+        did = str(item.get("id_str") or item.get("id") or "")
+        return self.DYNAMIC_PC_URL.format(dynamic_id=did)
+
+    def _build_render_result(
+        self,
+        *,
+        addition_title: str,
+        markdown_content: str,
+        addition_subtitle: str = "",
+    ) -> Dict[str, str]:
+        return {
+            "addition_title": addition_title,
+            "addition_subtitle": addition_subtitle,
+            "markdown_content": markdown_content,
+        }
+
+    def _render_video_dynamic_message(self, item: Dict[str, Any]) -> Dict[str, str]:
+        bvid, title = self.extract_video_info(item) or ("", "(无标题视频)")
+        dynamic_url = self._dynamic_url(item)
+        video_url = self.VIDEO_PC_URL.format(bvid=bvid)
+        pub_time = self.get_publish_time(item)
+        charge_prefix = "**【充电】**\n\n" if self.is_charge_dynamic(item) else ""
+
+        parts = [
+            f"{charge_prefix}**{title}**",
+            f"[原视频链接]({video_url})",
+            f"[动态链接]({dynamic_url})",
+        ]
+        if pub_time:
+            parts.append(pub_time)
+        return self._build_render_result(
+            addition_title="发布新视频",
+            markdown_content="\n\n".join(parts),
+        )
+
+    def _render_opus_dynamic_message(self, item: Dict[str, Any]) -> Dict[str, str]:
+        text = self.parse_text_from_item(item).strip() or "(无文本内容)"
+        pub_time = self.get_publish_time(item)
+        dynamic_url = self._dynamic_url(item)
+
+        parts = [text, f"[查看原动态]({dynamic_url})"]
+        if pub_time:
+            parts.append(pub_time)
+        return self._build_render_result(
+            addition_title="发布图文动态",
+            markdown_content="\n\n".join(parts),
+        )
+
+    def _render_text_dynamic_message(self, item: Dict[str, Any]) -> Dict[str, str]:
+        text = self.parse_text_from_item(item).strip()
+        orig_content = self._parse_orig_dynamic(item)
+        pub_time = self.get_publish_time(item)
+        dynamic_url = self._dynamic_url(item)
+        is_charge = self.is_charge_dynamic(item)
+        charge_prefix = "**【充电】**\n\n" if is_charge else ""
+
+        parts = []
+        if text:
+            parts.append(f"{charge_prefix}{text}")
+        elif is_charge:
+            parts.append(f"{charge_prefix}🔒 充电专属内容，请前往 B 站查看")
+        elif not orig_content:
+            parts.append("(无文本内容)")
+        if orig_content:
+            parts.append(f"---\n\n**转发内容：**\n{orig_content}")
+        parts.append(f"[查看原动态]({dynamic_url})")
+        if pub_time:
+            parts.append(pub_time)
+        return self._build_render_result(
+            addition_title="发布文字动态",
+            markdown_content="\n\n".join(parts),
+        )
+
+    def _render_live_dynamic_message(self, item: Dict[str, Any]) -> Dict[str, str]:
+        text = self.parse_text_from_item(item).strip() or "(无直播内容)"
+        pub_time = self.get_publish_time(item)
+        dynamic_url = self._dynamic_url(item)
+
+        parts = [text, f"[查看原动态]({dynamic_url})"]
+        if pub_time:
+            parts.append(pub_time)
+        return self._build_render_result(
+            addition_title="直播动态",
+            markdown_content="\n\n".join(parts),
+        )
+
+    def _render_fallback_dynamic_message(self, item: Dict[str, Any]) -> Dict[str, str]:
+        text = self.parse_text_from_item(item).strip() or "(无文本内容)"
+        pub_time = self.get_publish_time(item)
+        dynamic_url = self._dynamic_url(item)
+
+        parts = [text, f"[查看原动态]({dynamic_url})"]
+        if pub_time:
+            parts.append(pub_time)
+        return self._build_render_result(
+            addition_title="发布新动态",
+            markdown_content="\n\n".join(parts),
+        )
+
     async def fetch_user_space_dynamics(
-        self, session: aiohttp.ClientSession, uid: int, limit_recent: int = 20
+        self, uid: int, limit_recent: int = 20
     ) -> Dict[str, Any]:
         """
-        获取用户空间动态
-
-        Args:
-            session: HTTP会话
-            uid: 用户ID
-            limit_recent: 限制获取最近的动态数量
-
-        Returns:
-            Dict: API响应数据
+        使用 bilibili-api-python 获取用户动态（替代手写 HTTP 调用）
         """
-        params = {
-            "offset": "",
-            "host_mid": str(uid),
-            "timezone_offset": "-480",
-            "platform": "web",
-            "features": "itemOpusStyle,listOnlyfans,opusBigCover",
-            "web_location": "333.1387",
-        }
 
-        # 导入统一配置的User-Agent
-        from config import USER_AGENT
+        if not self.credential:
+            return {"code": -1, "message": "未配置SESSDATA，无法拉取动态"}
 
-        headers = {
-            "User-Agent": USER_AGENT,  # 使用配置的UA，与浏览器保持一致
-            "Referer": f"https://space.bilibili.com/{uid}/dynamic",
-            "Accept": "application/json, text/plain, */*",
-            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-            "Accept-Encoding": "gzip, deflate, br",
-            "Origin": "https://space.bilibili.com",
-            "Connection": "keep-alive",
-            "Sec-Fetch-Dest": "empty",
-            "Sec-Fetch-Mode": "cors",
-            "Sec-Fetch-Site": "same-site",
-            "sec-ch-ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
-            "sec-ch-ua-mobile": "?0",
-            "sec-ch-ua-platform": '"Windows"',
-        }
+        try:
+            u = user.User(uid=uid, credential=self.credential)
 
-        if self.cookie:
-            headers["Cookie"] = self.cookie
-        else:
-            # 即使没有完整Cookie，也添加一些基础标识
-            headers["Cookie"] = "buvid3=generated; b_nut=1234567890"
+            # get_dynamics_new 返回 {items: [...], has_more: 1/0, offset: ""}
+            page = await u.get_dynamics_new(offset="")
 
-        async with session.get(
-            self.BILI_SPACE_API, params=params, headers=headers, timeout=20
-        ) as resp:
-            resp.raise_for_status()
-            data = await resp.json()
+            items = page.get("items", []) or []
+            if len(items) > limit_recent:
+                items = items[:limit_recent]
 
-            # 限制返回的动态数量
-            if "data" in data and "items" in data["data"]:
-                items = data["data"]["items"]
-                if len(items) > limit_recent:
-                    data["data"]["items"] = items[:limit_recent]
+            return {
+                "code": 0,
+                "data": {"items": items},
+                "has_more": page.get("has_more"),
+                "offset": page.get("offset"),
+            }
 
-            return data
+        except Exception as e:
+            self.logger.error(f"获取用户动态失败: {e}")
+            return {"code": -1, "message": str(e)}
 
-    async def process_creator(
-        self, session: aiohttp.ClientSession, creator: Creator
-    ) -> None:
+    async def process_creator(self, creator: Creator) -> None:
         """
         处理单个创作者的动态
 
         Args:
-            session: HTTP会话
             creator: 创作者信息
         """
         # 获取最近20个动态
-        data = await self.fetch_user_space_dynamics(session, creator.uid, 20)
+        data = await self.fetch_user_space_dynamics(creator.uid, 20)
 
         # 调试：打印API响应
         self.logger.debug(
@@ -381,7 +1520,7 @@ class MonitorService:
             if data.get("code") != 0:
                 error_msg = f"API返回错误: code={data.get('code')}, message={data.get('message')}"
                 self.logger.warning(f"{creator.name} ({creator.uid}) - {error_msg}")
-                # 发送API错误通知
+                # 发送API错误通知：由 FeishuBot 的 alert 通道配置决定是否推送/推送到哪里
                 if self.feishu_bot:
                     try:
                         await self.feishu_bot.send_system_notification(
@@ -402,12 +1541,31 @@ class MonitorService:
         # 按发布时间戳排序
         items.sort(key=self.get_publish_timestamp, reverse=True)
 
+        # 每轮都检查近期动态的置顶评论变化（与是否有新动态无关）
+        await self._check_recent_pinned_comments(creator, items)
+
+        # 每轮都轮询近期动态的评论区，推送博主新评论
+        await self._poll_creator_comments(creator, items)
+
         last_seen = self.state.get_last_seen(creator.uid)
         if last_seen is None:
-            # 首次运行，推送最新的3个动态（如果有的话）
-            self.logger.info(f"首次监控 {creator.name}，将推送最新的几条动态")
+            # 默认策略（A）：不补发历史，只对齐游标到当前最新。
+            # 若用户显式开启补发（如 --reset），才会推送近期动态。
+            if not self._allow_backfill_on_start:
+                newest_id = items[0].get("id_str") or items[0].get("id")
+                if newest_id:
+                    self.state.set_last_seen(creator.uid, str(newest_id))
+                    self.state.save()
+                self.logger.info(
+                    f"首次/重启对齐：{creator.name} 已设置 last_seen，不补发历史动态"
+                )
+                return
 
-            # 获取最近48小时内的动态，但最多推送3条
+            # 补发模式：推送最近48小时内最多3条（显式触发，如 --reset）
+            self.logger.info(
+                f"首次监控 {creator.name}（补发模式），将推送最新的几条动态"
+            )
+
             current_time = time.time()
             time_window_hours = 48
             time_window_seconds = time_window_hours * 3600
@@ -420,35 +1578,27 @@ class MonitorService:
                 item_timestamp = self.get_publish_timestamp(item)
                 if item_timestamp >= earliest_allowed_timestamp:
                     initial_items.append(item)
-                    if len(initial_items) >= 3:  # 最多推送3条
+                    if len(initial_items) >= 3:
                         break
 
             if initial_items:
-                # 按时间顺序处理（从旧到新）
                 initial_items.sort(key=self.get_publish_timestamp)
-
                 self.logger.info(
-                    f"首次运行：为 {creator.name} 推送 {len(initial_items)} 条最新动态"
+                    f"补发模式：为 {creator.name} 推送 {len(initial_items)} 条最新动态"
                 )
-
                 for it in initial_items:
                     await self._process_dynamic_item(it, creator)
 
-                # 设置最新的为已看过
                 newest_processed = str(
                     initial_items[-1].get("id_str") or initial_items[-1].get("id")
                 )
                 self.state.set_last_seen(creator.uid, newest_processed)
                 self.state.save()
             else:
-                # 如果没有符合条件的动态，设置最新动态为已看过
                 newest_id = items[0].get("id_str") or items[0].get("id")
                 if newest_id:
                     self.state.set_last_seen(creator.uid, str(newest_id))
                     self.state.save()
-                    self.logger.info(
-                        f"首次运行：{creator.name} 没有最近48小时内的动态，已初始化状态"
-                    )
             return
 
         # 找到上次看过的动态的时间戳
@@ -534,13 +1684,8 @@ class MonitorService:
         """处理视频动态"""
         bvid, title = vinfo
         video_url = self.VIDEO_PC_URL.format(bvid=bvid)
-
-        pub_time = self.get_publish_time(item)
-
-        # 构建markdown内容
-        markdown_content = (
-            f"**{title}**\n\n[原视频链接]({video_url})\n[动态链接]({dynamic_url})"
-        )
+        rendered = self._render_video_dynamic_message(item)
+        markdown_content = rendered["markdown_content"]
 
         # 🆕 评论获取功能
         comment_content = await self._fetch_video_comments(bvid, title, creator)
@@ -561,21 +1706,26 @@ class MonitorService:
                 elif ok and links:
                     summary_text = f"[AI总结链接]({links[0]})"
                 else:
-                    summary_text = f"AI总结失败：{message}"
+                    detail = ""
+                    if contents and contents[0]:
+                        detail = f"\n\n{contents[0]}"
+                    summary_text = f"AI总结失败：{message}{detail}"
         except Exception as e:
             self.logger.error(f"AI总结异常: {e}")
             summary_text = f"AI总结异常：{str(e)}"
 
-        # 添加总结和时间
         if summary_text:
             markdown_content += f"\n\n{summary_text}"
-        if pub_time:
-            markdown_content += f"\n\n{pub_time}"
 
         # 发送到飞书
         if self.feishu_bot:
             await self.feishu_bot.send_card_message(
-                creator.name, "哔哩哔哩", markdown_content
+                creator.name,
+                "哔哩哔哩",
+                markdown_content,
+                channel=creator.feishu_channel,
+                addition_title=rendered["addition_title"],
+                addition_subtitle=rendered["addition_subtitle"],
             )
 
     async def _fetch_video_comments(
@@ -644,35 +1794,34 @@ class MonitorService:
         self, item: Dict[str, Any], creator: Creator, url: str
     ) -> None:
         """处理文字动态"""
-        text = self.parse_text_from_item(item)
-        if not text:
-            text = "(无文本内容)"
+        rendered = self._render_dynamic_message(item)
 
-        pub_time = self.get_publish_time(item)
-
-        # 构建markdown内容
-        markdown_content = text
-        if pub_time:
-            markdown_content = f"{text}\n\n{pub_time}"
-
-        markdown_content += f"\n\n[查看原动态]({url})"
+        self.logger.info(
+            "Render dynamic did=%s type=%s title=%s",
+            str(item.get("id_str") or item.get("id")),
+            self._classify_dynamic_render_type(item),
+            rendered["addition_title"],
+        )
 
         # 发送到飞书
         if self.feishu_bot:
             await self.feishu_bot.send_card_message(
-                creator.name, "哔哩哔哩", markdown_content
+                creator.name,
+                "哔哩哔哩",
+                rendered["markdown_content"],
+                channel=creator.feishu_channel,
+                addition_title=rendered["addition_title"],
+                addition_subtitle=rendered["addition_subtitle"],
             )
 
-    async def monitor_single_creator(
-        self, session: aiohttp.ClientSession, creator: Creator
-    ) -> None:
+    async def monitor_single_creator(self, creator: Creator) -> None:
         """监控单个创作者的独立任务"""
         while True:
             try:
                 self.logger.info(
                     f"开始检查创作者 {creator.name} (UID: {creator.uid}) 的动态"
                 )
-                await self.process_creator(session, creator)
+                await self.process_creator(creator)
 
                 # 添加随机抖动
                 jitter = random.uniform(0.8, 1.2)
@@ -687,7 +1836,7 @@ class MonitorService:
 
             except Exception as e:
                 self.logger.error(f"监控创作者 {creator.name} 时出错: {e}")
-                # 发送监控异常通知
+                # 发送监控异常通知：由 FeishuBot 的 alert 通道配置决定是否推送/推送到哪里
                 if self.feishu_bot:
                     try:
                         await self.feishu_bot.send_system_notification(
@@ -700,7 +1849,10 @@ class MonitorService:
                 await asyncio.sleep(60)
 
     async def start_monitoring(
-        self, creators: List[Creator], once: bool = False
+        self,
+        creators: List[Creator],
+        once: bool = False,
+        backfill_on_start: bool = False,
     ) -> None:
         """
         启动监控
@@ -709,86 +1861,263 @@ class MonitorService:
             creators: 创作者列表
             once: 是否只运行一次
         """
-        # 自动检查并刷新Cookie（如果需要且有refresh_token）
-        if self.cookie:
-            self.logger.info("检查Cookie是否需要刷新...")
-            refreshed_cookie = await self.bili_auth.auto_refresh_if_needed(self.cookie)
-            if refreshed_cookie != self.cookie:
-                self.logger.info("Cookie已自动刷新")
-                self.cookie = refreshed_cookie
-                # TODO: 更新到config或.env文件
-            else:
-                self.logger.info("Cookie无需刷新")
+        # 启动时检查并刷新凭证
+        await self._check_and_refresh_credential()
+        await self._poll_qr_login_status()
 
-        timeout = aiohttp.ClientTimeout(total=30)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            if once:
-                # 一次性检查模式
-                for c in creators:
-                    await self.process_creator(session, c)
-            else:
-                # 持续监控模式
-                self.logger.info(f"启动持续监控模式，共 {len(creators)} 个创作者")
+        # A 策略：启动时对齐 last_seen 到当前最新（不补发）。
+        # 若显式开启 backfill_on_start（例如 --reset），则跳过对齐，允许补发。
+        self._allow_backfill_on_start = bool(backfill_on_start)
 
-                tasks = []
-                for i, creator in enumerate(creators):
-                    initial_delay = i * 30  # 每个创作者间隔30秒启动
+        if not self._allow_backfill_on_start:
+            await self._prime_last_seen(creators)
 
-                    async def delayed_monitor(creator, delay):
-                        if delay > 0:
-                            self.logger.info(
-                                f"创作者 {creator.name}: 将在 {delay} 秒后开始监控"
+        if once:
+            # 一次性检查模式
+            for c in creators:
+                await self.process_creator(c)
+        else:
+            # 持续监控模式：使用 APScheduler 统一调度（cron / interval）
+            self.logger.info(
+                f"启动持续监控模式（APScheduler），共 {len(creators)} 个创作者"
+            )
+
+            scheduler = AsyncIOScheduler(timezone=self._SCHEDULER_TIMEZONE)
+
+            # 初始化配置文件监控器（热重载）
+            config_watcher = ConfigFileWatcher(self.CREATORS_PATH, check_interval=600)
+            config_watcher.initialize()
+
+            async def _run_creator_job(c: Creator) -> None:
+                await self.process_creator(c)
+
+            def _setup_creator_jobs(
+                sched: AsyncIOScheduler, creator_list: List[Creator]
+            ) -> None:
+                """为创作者列表设置调度任务"""
+                for creator in creator_list:
+                    if creator.crons:
+                        for idx, expr in enumerate(creator.crons):
+                            if not isinstance(expr, str) or not expr.strip():
+                                continue
+                            trigger = CronTrigger.from_crontab(
+                                expr.strip(), timezone=self._SCHEDULER_TIMEZONE
                             )
-                            await asyncio.sleep(delay)
-                        await self.monitor_single_creator(session, creator)
+                            sched.add_job(
+                                _run_creator_job,
+                                trigger=trigger,
+                                args=[creator],
+                                id=f"monitor:{creator.uid}:{idx}",
+                                max_instances=1,
+                                coalesce=True,
+                                jitter=int(creator.jitter_seconds or 0) or None,
+                                replace_existing=True,
+                            )
+                            self.logger.info(
+                                f"已为 {creator.name} 设置 cron: {expr.strip()} (jitter={creator.jitter_seconds}s)"
+                            )
+                    else:
+                        sched.add_job(
+                            _run_creator_job,
+                            trigger="interval",
+                            seconds=max(30, int(creator.check_interval)),
+                            args=[creator],
+                            id=f"monitor:{creator.uid}:interval",
+                            max_instances=1,
+                            coalesce=True,
+                            jitter=int(creator.jitter_seconds or 0) or None,
+                            replace_existing=True,
+                        )
+                        self.logger.info(
+                            f"已为 {creator.name} 设置 interval: {creator.check_interval}s (jitter={creator.jitter_seconds}s)"
+                        )
 
-                    task = asyncio.create_task(delayed_monitor(creator, initial_delay))
-                    tasks.append(task)
+            async def _reload_config(sched: AsyncIOScheduler) -> None:
+                """热重载配置文件"""
+                self.logger.info("检测到配置文件变化，开始热重载...")
 
-                try:
-                    await asyncio.gather(*tasks)
-                except KeyboardInterrupt:
-                    self.logger.info("收到停止信号，正在关闭监控...")
-                    for task in tasks:
-                        task.cancel()
-                    await asyncio.gather(*tasks, return_exceptions=True)
+                # 加载新配置
+                new_creators = self.load_creators_from_file()
+                if not new_creators:
+                    self.logger.warning("热重载失败：新配置为空或无效，保持当前配置")
+                    return
+
+                # 获取当前所有任务ID
+                old_job_ids = {
+                    job.id for job in sched.get_jobs() if job.id.startswith("monitor:")
+                }
+
+                # 移除所有旧的监控任务
+                for job_id in old_job_ids:
+                    try:
+                        sched.remove_job(job_id)
+                    except Exception:
+                        pass
+
+                # 对齐新创作者的 last_seen（避免补发）
+                if not self._allow_backfill_on_start:
+                    await self._prime_last_seen(new_creators)
+
+                # 添加新任务
+                _setup_creator_jobs(sched, new_creators)
+
+                self.logger.info(
+                    f"热重载完成：已更新 {len(new_creators)} 个创作者的监控任务"
+                )
+
+                # 发送热重载通知
+                if self.feishu_bot:
+                    try:
+                        creator_names = ", ".join([c.name for c in new_creators[:5]])
+                        if len(new_creators) > 5:
+                            creator_names += f" 等{len(new_creators)}个"
+                        await self.feishu_bot.send_system_notification(
+                            self.feishu_bot.LEVEL_INFO,
+                            "配置热重载成功",
+                            f"已自动重新加载创作者配置\n\n**当前监控:** {creator_names}",
+                        )
+                    except Exception:
+                        pass
+
+            # 添加配置文件监控任务（每10秒检查一次）
+            async def _check_config_changes() -> None:
+                if config_watcher.check_for_changes():
+                    await _reload_config(scheduler)
+
+            scheduler.add_job(
+                _check_config_changes,
+                trigger="interval",
+                seconds=10,
+                id="config_watcher",
+                max_instances=1,
+                coalesce=True,
+            )
+            self.logger.info("配置文件热重载监控已启动（每10秒检查一次）")
+
+            # 添加凭证自动刷新任务（每6小时检查一次）
+            async def _check_credential() -> None:
+                await self._check_and_refresh_credential()
+                await self._poll_qr_login_status()
+
+            # 启动时立即检查一次凭证
+            asyncio.create_task(_check_credential())
+
+            scheduler.add_job(
+                _check_credential,
+                trigger="interval",
+                seconds=self._CREDENTIAL_REFRESH_INTERVAL,
+                id="credential_refresh",
+                max_instances=1,
+                coalesce=True,
+            )
+            self.logger.info(
+                f"凭证自动刷新已启动（每{self._CREDENTIAL_REFRESH_INTERVAL // 3600}小时检查一次）"
+            )
+
+            # 添加高频 QR 登录轮询任务（每3秒检查一次）
+            async def _poll_qr() -> None:
+                await self._poll_qr_login_status()
+
+            scheduler.add_job(
+                _poll_qr,
+                trigger="interval",
+                seconds=3,
+                id="qr_poll",
+                max_instances=1,
+                coalesce=True,
+            )
+            self.logger.info("QR登录轮询已启动（每3秒检查一次）")
+
+            # 设置初始创作者任务
+            _setup_creator_jobs(scheduler, creators)
+
+            scheduler.start()
+
+            try:
+                await asyncio.Event().wait()
+            except KeyboardInterrupt:
+                self.logger.info("收到停止信号，正在关闭调度器...")
+                scheduler.shutdown(wait=False)
+
+    async def _prime_last_seen(self, creators: List[Creator]) -> None:
+        """启动时对齐每个 UP 的 last_seen 到当前最新，不发送任何通知。
+
+        仅对尚无 last_seen 记录的创作者进行对齐，已有记录的保持不变。
+        """
+        if not creators:
+            return
+
+        for c in creators:
+            # 已有 last_seen 记录的跳过，避免覆盖
+            if self.state.get_last_seen(c.uid) is not None:
+                continue
+            try:
+                data = await self.fetch_user_space_dynamics(c.uid, 1)
+                items = data.get("data", {}).get("items", []) or []
+                if not items:
+                    continue
+                newest_id = items[0].get("id_str") or items[0].get("id")
+                if newest_id:
+                    self.state.set_last_seen(c.uid, str(newest_id))
+                    self.logger.info(f"启动对齐：{c.name} 设置 last_seen={newest_id}")
+            except Exception as e:
+                self.logger.warning(f"启动对齐 last_seen 失败: {c.name} ({c.uid}): {e}")
+
+        self.state.save()
 
     @staticmethod
     def load_creators_from_file(path: str = CREATORS_PATH) -> List[Creator]:
         """从文件加载创作者列表"""
         os.makedirs(os.path.dirname(path), exist_ok=True)
 
-        default = [
-            {"uid": 11473291, "name": "笨笨的芝菜", "check_interval": 300},
-            {"uid": 550494308, "name": "卢本圆复盘", "check_interval": 300},
-        ]
-
+        # 安全：不再自动生成默认博主列表，避免把个人订阅信息写入工作区。
+        # 请手动从 data/bilibili_creators.json.example 复制并修改为 data/bilibili_creators.json。
         if not os.path.exists(path):
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(default, f, ensure_ascii=False, indent=2)
+            return []
 
         try:
             with open(path, "r", encoding="utf-8") as f:
                 items = json.load(f)
             creators = []
             for i in items:
+                # 如果配置中显式禁用（enabled=false），则跳过该条目以便保留但不生效
+                if i.get("enabled", True) is False:
+                    continue
+                channel = i.get("feishu_channel") or i.get("channel")
+
+                crons_val = i.get("crons")
+                if crons_val is None:
+                    crons_val = i.get("cron")
+                if isinstance(crons_val, str) and crons_val.strip():
+                    crons: List[str] = [crons_val.strip()]
+                elif isinstance(crons_val, list):
+                    crons = [str(x).strip() for x in crons_val if str(x).strip()]
+                else:
+                    crons = []
+
+                jitter = i.get("jitter_seconds")
+                if jitter is None:
+                    jitter = i.get("jitter")
+                jitter_seconds = int(jitter or 0)
+
                 creator = Creator(
                     uid=int(i["uid"]),
                     name=str(i["name"]),
                     check_interval=int(i.get("check_interval", 300)),
                     enable_comments=bool(i.get("enable_comments", False)),
                     comment_rules=i.get("comment_rules", []),
+                    comment_length_min=int(i.get("comment_length_min", 10)),
+                    comment_poll_interval_seconds=int(
+                        i.get("comment_poll_interval_seconds", 600)
+                    ),
+                    comment_poll_window_seconds=int(
+                        i.get("comment_poll_window_seconds", 24 * 3600)
+                    ),
+                    feishu_channel=str(channel).strip() if channel else None,
+                    crons=crons,
+                    jitter_seconds=jitter_seconds,
                 )
                 creators.append(creator)
             return creators
         except Exception:
-            return [
-                Creator(
-                    uid=i["uid"],
-                    name=i["name"],
-                    check_interval=i.get("check_interval", 300),
-                    enable_comments=False,
-                    comment_rules=[],
-                )
-                for i in default
-            ]
+            return []

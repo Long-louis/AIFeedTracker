@@ -1,87 +1,76 @@
-# 飞书卡片模板配置指南
+# 飞书卡片配置
 
-本项目使用飞书卡片消息推送视频总结和动态通知。由于卡片模板是绑定到特定飞书应用的，您需要在自己的飞书应用中创建相同的卡片模板。
+项目通过飞书群机器人 Webhook 推送模板卡片消息。推荐直接使用仓库里的 `docs/博主更新订阅.card` 作为起点。
 
-## 前提条件
+## 你需要准备的内容
 
-1. 已创建飞书企业自建应用
-2. 已获取 `app_id` 和 `app_secret`
-3. 应用已开启消息相关权限
+1. 一个飞书卡片模板
+2. 一个或多个飞书群机器人 Webhook
+3. `.env` 中的模板信息
+4. `data/feishu_channels.json` 中的通道配置
 
-## 快速创建卡片模板
+## 导入卡片模板
 
-### 方式一：使用项目提供的卡片文件（推荐）
+1. 打开飞书开放平台并进入卡片搭建工具。
+2. 导入 `docs/博主更新订阅.card`。
+3. 发布后记录：
+   - `template_id`
+   - `template_version_name`
 
-项目已提供现成的卡片模板文件：`docs/博主更新订阅.card`
-
-#### 步骤：
-
-1. **访问飞书开放平台**
-   
-   打开 [飞书开放平台](https://open.feishu.cn/)，进入您的应用管理页面
-
-2. **进入消息卡片功能**
-   
-   在应用详情页，找到「消息卡片」→「卡片搭建工具」
-
-3. **导入卡片文件**
-   
-   - 点击「导入」按钮
-   - 选择项目中的 `docs/博主更新订阅.card` 文件
-   - 卡片模板会自动加载
-
-4. **预览和调整**
-   
-   - 检查卡片预览效果
-   - 如需调整颜色或样式，可在可视化编辑器中修改
-   - 卡片包含3个变量：
-     - `platform` - 平台名称（如：哔哩哔哩）
-     - `Influencer` - 博主名称
-     - `markdown_content` - Markdown格式内容
-
-5. **发布卡片**
-   
-   - 点击「保存并发布」
-   - 记录生成的：
-     - **模板ID** (`template_id`)
-     - **版本名称** (`template_version_name`)
-
-#### 卡片预览效果
-
-```
-┌──────────────────────────────────────┐
-│ 哔哩哔哩                              │  ← 蓝色标题栏（platform）
-│ 某某博主                              │  ← 副标题（Influencer）
-├──────────────────────────────────────┤
-│                                      │
-│ 📌 核心观点                           │  ← Markdown内容
-│ - 要点1                               │
-│ - 要点2                               │
-│                                      │
-│ 💡 关键亮点                           │
-│ 这是总结内容...                       │
-│                                      │
-│ [查看原视频](链接)                    │
-│                                      │
-└──────────────────────────────────────┘
-```
-
-
-## 配置到项目
-
-### 更新 .env 文件
+把这两个值写入 `.env`：
 
 ```env
-# 飞书应用配置
-app_id=cli_xxxxxxxxxxxxx
-app_secret=xxxxxxxxxxxxxxxxxxxxx
-
-# 飞书消息配置
-FEISHU_TEMPLATE_ID=您的消息模板ID
-FEISHU_TEMPLATE_VERSION=您的消息模板版本
-FEISHU_USER_OPEN_ID=您的用户open_id
+FEISHU_TEMPLATE_ID=your-template-id
+FEISHU_TEMPLATE_VERSION=your-template-version
 ```
 
-### 获取用户 open_id
+## 配置 Webhook 通道
 
-请查看[飞书文档](https://open.feishu.cn/document/server-docs/contact-v3/user/batch_get_id?appId=cli_a8675b0dfcc3500d)
+先复制示例文件：
+
+```bash
+cp data/feishu_channels.json.example data/feishu_channels.json
+```
+
+然后填写真实 Webhook：
+
+```json
+{
+  "defaults": {
+    "content": "webhook:default",
+    "alert": "webhook:alerts"
+  },
+  "webhooks": {
+    "default": {
+      "url": "https://open.feishu.cn/open-apis/bot/v2/hook/REPLACE_ME",
+      "secret": ""
+    },
+    "alerts": {
+      "url": "https://open.feishu.cn/open-apis/bot/v2/hook/REPLACE_ME",
+      "secret": ""
+    }
+  }
+}
+```
+
+## 为订阅单独指定通道
+
+在 `data/bilibili_creators.json` 里可以给某个 UP 主单独指定通道：
+
+```json
+{
+  "uid": 123456,
+  "name": "示例UP主",
+  "feishu_channel": "webhook:default"
+}
+```
+
+## 验证
+
+完成配置后运行：
+
+```bash
+uv run python main.py --mode monitor --once
+```
+
+如果卡片模板字段不匹配，请检查模板里是否包含 `Influencer`、`addition_title`、`platform`、`addition_subtitle`、`markdown_content` 这些变量。

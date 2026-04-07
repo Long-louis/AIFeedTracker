@@ -32,6 +32,17 @@ class TestPublicRepoReady(unittest.TestCase):
         for path in required:
             self.assertTrue(Path(path).exists(), path)
 
+    def test_private_deploy_helpers_are_not_shipped(self):
+        forbidden = [
+            ".env.example",
+            "deploy/.env.example",
+            "scripts/commit-and-deploy.sh",
+            "scripts/deploy-native.sh",
+            "scripts/deploy.sh",
+        ]
+        for path in forbidden:
+            self.assertFalse(Path(path).exists(), path)
+
 
 if __name__ == "__main__":
     unittest.main()

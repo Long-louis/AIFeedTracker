@@ -44,7 +44,7 @@ class AIVideoBot:
 
         self.logger.info("AI视频机器人初始化完成")
 
-    async def send_startup_notification(self):
+    async def send_startup_notification(self) -> None:
         """发送启动通知"""
         try:
             content = "机器人已成功启动\n\n"
@@ -102,7 +102,7 @@ class AIVideoBot:
             self.logger.error(f"视频总结异常: {e}")
             return ""
 
-    async def send_notification(self, influencer: str, platform: str, content: str):
+    async def send_notification(self, influencer: str, platform: str, content: str) -> None:
         """发送通知消息到飞书
 
         Args:
@@ -128,7 +128,7 @@ class AIVideoBot:
         except Exception as e:
             self.logger.error(f"发送通知异常: {e}")
 
-    async def start_monitoring(self, once: bool = False, reset: bool = False):
+    async def start_monitoring(self, once: bool = False, reset: bool = False) -> None:
         """启动动态监控
 
         Args:
@@ -187,7 +187,7 @@ class AIVideoBot:
             except Exception:
                 pass
 
-    async def cleanup(self):
+    async def cleanup(self) -> None:
         """清理资源"""
         try:
             # AI总结服务不需要清理浏览器资源
@@ -196,7 +196,7 @@ class AIVideoBot:
             self.logger.warning(f"资源清理警告: {e}")
 
 
-async def main():
+async def main() -> None:
     """主函数 - 项目统一入口"""
     import argparse
 

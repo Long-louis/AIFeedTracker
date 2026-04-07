@@ -689,7 +689,7 @@ class CommentFetcher:
 
 
 # 使用示例
-async def example_usage():
+async def example_usage() -> None:
     """使用示例"""
     from config import BILIBILI_CONFIG
 

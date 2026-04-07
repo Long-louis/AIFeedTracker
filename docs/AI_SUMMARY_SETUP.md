@@ -65,7 +65,7 @@ LOCAL_ASR_CLEANUP_TEMP_FILES=true
 4. 调用 AI 服务生成 Markdown 总结
 5. 将总结附加到飞书卡片中
 
-如果没有配置 `AI_API_KEY`，服务仍可运行，只是不会生成 AI 总结。
+`AI_API_KEY` 是启用 AI 总结服务的必填项；如果未配置，`AISummaryService` 初始化时会报错，服务无法正常启用 AI 总结流程。
 
 ## 验证
 

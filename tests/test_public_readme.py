@@ -20,13 +20,15 @@ class TestPublicReadme(unittest.TestCase):
 
     def test_readme_contains_upgrade_notice(self):
         content = Path("README.md").read_text(encoding="utf-8")
-        self.assertIn("升级", content)
-        self.assertIn("配置文件", content)
+        self.assertIn(
+            "升级到新版本后，请同步检查 `.env` 与 `data/*.json` 配置文件是否仍与最新示例文件一致",
+            content,
+        )
+        self.assertIn("如示例文件结构有变化，请手动更新你的本地配置文件。", content)
 
     def test_readme_mentions_local_asr_fallback_wording(self):
         content = Path("README.md").read_text(encoding="utf-8")
-        self.assertIn("本地 ASR", content)
-        self.assertIn("回退", content)
+        self.assertIn("可选本地 ASR 回退", content)
 
     def test_readme_mentions_local_asr_disable_flag(self):
         content = Path("README.md").read_text(encoding="utf-8")

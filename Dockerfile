@@ -45,8 +45,6 @@ RUN apt-get update && \
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app
 ENV PATH="/app/.venv/bin:$PATH"
-ENV LOCAL_ASR_DEVICE=cpu
-ENV LOCAL_ASR_COMPUTE_TYPE=int8
 
 # 从构建阶段复制虚拟环境
 COPY --from=builder /app/.venv /app/.venv

@@ -29,10 +29,10 @@ class TestPublicDocs(unittest.TestCase):
         self.assertNotRegex(content.lower(), r"\bscp\b")
         self.assertNotIn("私有部署", content)
 
-    def test_dockerfile_sets_public_local_asr_cpu_defaults(self):
+    def test_dockerfile_does_not_duplicate_app_local_asr_defaults(self):
         content = Path("Dockerfile").read_text(encoding="utf-8")
-        self.assertIn("ENV LOCAL_ASR_DEVICE=cpu", content)
-        self.assertIn("ENV LOCAL_ASR_COMPUTE_TYPE=int8", content)
+        self.assertNotIn("ENV LOCAL_ASR_DEVICE=cpu", content)
+        self.assertNotIn("ENV LOCAL_ASR_COMPUTE_TYPE=int8", content)
 
     def test_compose_documents_public_container_asr_runtime_limits(self):
         content = Path("deploy/docker-compose.yml").read_text(encoding="utf-8")

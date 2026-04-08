@@ -24,8 +24,10 @@ class TestPublicReadme(unittest.TestCase):
     def test_readme_mentions_optional_local_asr_cpu_fallback(self):
         content = Path("README.md").read_text(encoding="utf-8")
         self.assertIn("本地 ASR", content)
-        self.assertIn("可选", content)
+        self.assertIn("回退", content)
+        self.assertIn("LOCAL_ASR_ENABLED=false", content)
         self.assertIn("LOCAL_ASR_DEVICE=cpu", content)
+        self.assertIn("faster_whisper", content)
 
 
 if __name__ == "__main__":

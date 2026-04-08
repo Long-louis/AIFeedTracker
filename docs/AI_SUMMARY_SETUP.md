@@ -34,6 +34,13 @@ AI_API_KEY=your-api-key
 - `LOCAL_ASR_PROVIDER` 当前只支持 `faster_whisper`。
 - `LOCAL_ASR_DEVICE=cpu` 是无 GPU 环境的配置方式。
 
+运行时说明：
+
+- 本地运行时需要可用的 `ffmpeg`，用于音频处理。
+- 当前 Docker 镜像已包含 `ffmpeg`，可在容器内以 CPU 方式运行 `faster_whisper`。
+- 当前镜像未打包 `faster_whisper` GPU 推理所需的 CUDA/cuDNN 运行库；不要把 `gpus: all` 视为自动获得 GPU ASR 能力。
+- 若希望容器内真正使用 GPU，需要额外构建或改用包含 CUDA/cuDNN 运行时的镜像。
+
 示例配置：
 
 ```env

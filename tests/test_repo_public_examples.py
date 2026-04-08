@@ -32,6 +32,10 @@ class TestRepoPublicExamples(unittest.TestCase):
         self.assertIn("data/feishu_channels.json.example", content)
         self.assertIn("data/bilibili_creators.json.example", content)
         self.assertIn("FEISHU_TEMPLATE_ID", content)
+        self.assertIn("Optional local ASR fallback", content)
+        self.assertIn("LOCAL_ASR_ENABLED", content)
+        self.assertIn("LOCAL_ASR_DEVICE=cpu", content)
+        self.assertIn("only `faster_whisper`", content)
 
 
 if __name__ == "__main__":

@@ -17,6 +17,15 @@ class TestPublicDocs(unittest.TestCase):
     def test_deploy_automation_doc_removed(self):
         self.assertFalse(Path("docs/DEPLOY_AUTOMATION.md").exists())
 
+    def test_ai_summary_setup_mentions_public_local_asr_cpu_boundary(self):
+        content = Path("docs/AI_SUMMARY_SETUP.md").read_text(encoding="utf-8")
+        self.assertIn("LOCAL_ASR_DEVICE=cpu", content)
+        self.assertIn("faster_whisper", content)
+        self.assertNotIn("deploy/.env.example", content)
+        self.assertNotIn("docs/DEPLOY_AUTOMATION.md", content)
+        self.assertNotIn("scp", content.lower())
+        self.assertNotIn("私有部署", content)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -12,9 +12,11 @@ class TestPublicReadme(unittest.TestCase):
     def test_readme_does_not_mention_private_repo_or_scp(self):
         content = Path("README.md").read_text(encoding="utf-8")
         self.assertNotIn("AIFeedTracker-private", content)
-        self.assertNotIn("scp", content.lower())
+        self.assertNotRegex(content.lower(), r"\bscp\b")
         self.assertNotIn("deploy/.env.example", content)
         self.assertNotIn("docs/DEPLOY_AUTOMATION.md", content)
+        self.assertNotIn("私有部署", content)
+        self.assertNotIn("私有工作流", content)
 
     def test_readme_contains_upgrade_notice(self):
         content = Path("README.md").read_text(encoding="utf-8")

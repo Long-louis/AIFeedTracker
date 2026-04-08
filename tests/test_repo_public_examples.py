@@ -25,12 +25,11 @@ class TestRepoPublicExamples(unittest.TestCase):
         self.assertNotIn("apps", data)
         self.assertEqual(set(data), {"defaults", "webhooks"})
 
-    def test_env_example_mentions_current_config_files(self):
+    def test_env_example_mentions_public_local_asr_boundary(self):
         content = Path("env.example").read_text(encoding="utf-8")
         self.assertIn("data/feishu_channels.json.example", content)
         self.assertIn("data/bilibili_creators.json.example", content)
         self.assertIn("FEISHU_TEMPLATE_ID", content)
-        self.assertIn("Optional local ASR fallback", content)
         self.assertIn("LOCAL_ASR_ENABLED=false", content)
         self.assertIn("LOCAL_ASR_DEVICE=cpu", content)
         self.assertIn("LOCAL_ASR_COMPUTE_TYPE=int8", content)

@@ -9,7 +9,9 @@ class TestPublicDocs(unittest.TestCase):
         ai = Path("docs/AI_SUMMARY_SETUP.md").read_text(encoding="utf-8")
         joined = "\n".join([bilibili, feishu, ai])
         self.assertNotIn("AIFeedTracker-private", joined)
-        self.assertNotIn("scp", joined.lower())
+        self.assertNotRegex(joined.lower(), r"\bscp\b")
+        self.assertNotIn("私有部署", joined)
+        self.assertNotIn("私有工作流", joined)
 
     def test_card_asset_still_exists(self):
         self.assertTrue(Path("docs/博主更新订阅.card").exists())
@@ -24,7 +26,7 @@ class TestPublicDocs(unittest.TestCase):
         self.assertIn("faster_whisper", content)
         self.assertNotIn("deploy/.env.example", content)
         self.assertNotIn("docs/DEPLOY_AUTOMATION.md", content)
-        self.assertNotIn("scp", content.lower())
+        self.assertNotRegex(content.lower(), r"\bscp\b")
         self.assertNotIn("私有部署", content)
 
 

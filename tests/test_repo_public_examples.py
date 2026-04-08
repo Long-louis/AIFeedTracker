@@ -22,10 +22,8 @@ class TestRepoPublicExamples(unittest.TestCase):
         )
         self.assertIn("defaults", data)
         self.assertIn("webhooks", data)
-        self.assertNotIn(
-            ',\n  "apps"',
-            Path("data/feishu_channels.json.example").read_text(encoding="utf-8"),
-        )
+        self.assertNotIn("apps", data)
+        self.assertEqual(set(data), {"defaults", "webhooks"})
 
     def test_env_example_mentions_current_config_files(self):
         content = Path("env.example").read_text(encoding="utf-8")

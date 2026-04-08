@@ -21,12 +21,21 @@ class TestPublicReadme(unittest.TestCase):
         self.assertIn("升级", content)
         self.assertIn("配置文件", content)
 
-    def test_readme_mentions_optional_local_asr_cpu_fallback(self):
+    def test_readme_mentions_local_asr_fallback_wording(self):
         content = Path("README.md").read_text(encoding="utf-8")
         self.assertIn("本地 ASR", content)
         self.assertIn("回退", content)
+
+    def test_readme_mentions_local_asr_disable_flag(self):
+        content = Path("README.md").read_text(encoding="utf-8")
         self.assertIn("LOCAL_ASR_ENABLED=false", content)
+
+    def test_readme_mentions_local_asr_cpu_mode(self):
+        content = Path("README.md").read_text(encoding="utf-8")
         self.assertIn("LOCAL_ASR_DEVICE=cpu", content)
+
+    def test_readme_mentions_faster_whisper_boundary(self):
+        content = Path("README.md").read_text(encoding="utf-8")
         self.assertIn("faster_whisper", content)
 
 

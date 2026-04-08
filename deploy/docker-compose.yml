@@ -15,6 +15,10 @@ services:
     volumes:
       - ../data:/app/data
       - ../log:/app/log
+    # 可选：当前镜像已包含 `ffmpeg`，支持本地 ASR 音频处理与 CPU 执行。
+    # 即使宿主机安装了 NVIDIA Container Toolkit，单独启用 `gpus: all` 也不能让当前镜像直接获得 GPU ASR 能力，
+    # 因为现有 Dockerfile 仍未打包 `faster_whisper` 所需的 CUDA/cuDNN 运行库。
+    # 如需容器内 GPU ASR，请改用或额外构建包含 CUDA/cuDNN 运行时的镜像，再按你的 Docker/Compose 版本声明 GPU 访问权限。
     # 可选：如果你需要固定时区（也可以直接写进 .env）
     # environment:
     #   TZ: Asia/Shanghai

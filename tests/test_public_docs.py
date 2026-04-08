@@ -29,6 +29,21 @@ class TestPublicDocs(unittest.TestCase):
         self.assertNotRegex(content.lower(), r"\bscp\b")
         self.assertNotIn("私有部署", content)
 
+    def test_dockerfile_sets_public_local_asr_cpu_defaults(self):
+        content = Path("Dockerfile").read_text(encoding="utf-8")
+        self.assertIn("ENV LOCAL_ASR_DEVICE=cpu", content)
+        self.assertIn("ENV LOCAL_ASR_COMPUTE_TYPE=int8", content)
+
+    def test_compose_documents_public_container_asr_runtime_limits(self):
+        content = Path("deploy/docker-compose.yml").read_text(encoding="utf-8")
+        self.assertIn("当前镜像已包含 `ffmpeg`", content)
+        self.assertIn("支持本地 ASR 音频处理与 CPU 执行", content)
+        self.assertIn("单独启用 `gpus: all` 也不能", content)
+        self.assertIn("CUDA/cuDNN 运行库", content)
+        self.assertIn("包含 CUDA/cuDNN 运行时的镜像", content)
+        self.assertNotIn("deploy/.env.example", content)
+        self.assertNotRegex(content.lower(), r"\bscp\b")
+
 
 if __name__ == "__main__":
     unittest.main()

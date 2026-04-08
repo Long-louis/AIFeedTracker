@@ -25,7 +25,7 @@ class TestPublicReadme(unittest.TestCase):
         content = Path("README.md").read_text(encoding="utf-8")
         self.assertIn("本地 ASR", content)
         self.assertIn("可选", content)
-        self.assertIn("CPU", content)
+        self.assertIn("LOCAL_ASR_DEVICE=cpu", content)
 
 
 if __name__ == "__main__":

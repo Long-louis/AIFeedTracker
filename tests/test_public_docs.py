@@ -44,6 +44,34 @@ class TestPublicDocs(unittest.TestCase):
         self.assertNotIn("deploy/.env.example", content)
         self.assertNotRegex(content.lower(), r"\bscp\b")
 
+    def test_gpu_deploy_files_exist(self):
+        self.assertTrue(Path("Dockerfile.gpu").exists())
+        self.assertTrue(Path("deploy/docker-compose.gpu.yml").exists())
+
+    def test_gpu_compose_declares_gpu_runtime_path(self):
+        content = Path("deploy/docker-compose.gpu.yml").read_text(encoding="utf-8")
+        self.assertIn("dockerfile: Dockerfile.gpu", content)
+        self.assertIn("runtime: nvidia", content)
+        self.assertIn("NVIDIA_VISIBLE_DEVICES=all", content)
+        self.assertIn("NVIDIA_DRIVER_CAPABILITIES=compute,utility", content)
+        self.assertIn("NVIDIA Container Toolkit", content)
+        self.assertNotIn("deploy/.env.example", content)
+        self.assertNotRegex(content.lower(), r"\bscp\b")
+
+    def test_ai_summary_setup_mentions_gpu_container_path(self):
+        content = Path("docs/AI_SUMMARY_SETUP.md").read_text(encoding="utf-8")
+        self.assertIn("deploy/docker-compose.gpu.yml", content)
+        self.assertIn("NVIDIA Container Toolkit", content)
+        self.assertNotRegex(content.lower(), r"\bscp\b")
+
+    def test_ai_summary_setup_mentions_feishu_docs_kb_and_trimmed_sections(self):
+        content = Path("docs/AI_SUMMARY_SETUP.md").read_text(encoding="utf-8")
+        self.assertIn("## 视频总结输出结构", content)
+        self.assertIn("## 关键信息和观点", content)
+        self.assertIn("## 时间线总结", content)
+        self.assertIn("FEISHU_DOCS_ENABLED=true", content)
+        self.assertIn("根 -> 博主 -> YYYY-MM -> 视频文档", content)
+
 
 if __name__ == "__main__":
     unittest.main()

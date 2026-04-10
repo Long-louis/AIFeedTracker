@@ -4,6 +4,7 @@ import logging
 import time
 import unittest
 
+from services.ai_summary.service import VideoSummaryResult
 from services.monitor import MonitorService
 
 
@@ -539,6 +540,79 @@ class TestMonitorDynamicSendPath(unittest.IsolatedAsyncioTestCase):
         self.assertIn(
             "**充电视频标题**", monitor.feishu_bot.cards[0]["markdown_content"]
         )
+
+    async def test_process_video_dynamic_appends_knowledge_doc_link_after_ai_summary(
+        self,
+    ):
+        monitor = MonitorService.__new__(MonitorService)
+        monitor.feishu_bot = _FakeFeishuBot()
+        monitor.logger = logging.getLogger("tests.test_monitor.render_send")
+
+        class _FakeSummarizer:
+            async def summarize_video(self, video_url):
+                return (
+                    True,
+                    "成功总结 1 个视频",
+                    VideoSummaryResult(
+                        video_url=video_url,
+                        summary_source="subtitle",
+                        summary_markdown="## 关键信息和观点\n- A\n\n## 时间线总结\n- 00:00 B",
+                    ),
+                )
+
+        class _FakeDocsService:
+            async def upsert_video_summary(self, **kwargs):
+                return "https://feishu.cn/docx/knowledge-doc"
+
+        monitor.summarizer = _FakeSummarizer()
+        monitor.feishu_docs_service = _FakeDocsService()
+
+        async def fake_fetch_video_comments(bvid, title, creator):
+            return None
+
+        monitor._fetch_video_comments = fake_fetch_video_comments
+
+        item = {
+            "id_str": "21",
+            "modules": {
+                "module_author": {"pub_time": "发布时间：2026-04-09 10:00:00"},
+                "module_dynamic": {
+                    "major": {
+                        "type": "MAJOR_TYPE_ARCHIVE",
+                        "archive": {
+                            "title": "视频标题",
+                            "bvid": "BV1xx411c7mD",
+                            "jump_url": "https://www.bilibili.com/video/BV1xx411c7mD",
+                        },
+                    }
+                },
+            },
+        }
+        creator = type(
+            "CreatorStub",
+            (),
+            {
+                "uid": 1001,
+                "name": "测试UP",
+                "feishu_channel": None,
+                "enable_comments": False,
+                "comment_rules": [],
+            },
+        )()
+
+        await monitor._process_video_dynamic(
+            item,
+            ("BV1xx411c7mD", "视频标题"),
+            creator,
+            "https://t.bilibili.com/21",
+        )
+
+        self.assertEqual(len(monitor.feishu_bot.cards), 1)
+        content = monitor.feishu_bot.cards[0]["markdown_content"]
+        ai_index = content.find("**AI 总结**")
+        kb_index = content.find("[知识库文档](https://feishu.cn/docx/knowledge-doc)")
+        self.assertGreaterEqual(ai_index, 0)
+        self.assertGreater(kb_index, ai_index)
 
 
 if __name__ == "__main__":

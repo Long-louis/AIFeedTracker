@@ -7,18 +7,18 @@ services:
     container_name: ai-feed-tracker
     restart: unless-stopped
 
-    # 你需要在服务器的 deploy/.env 里填写运行时环境变量（FEISHU_TEMPLATE_ID、AI_API_KEY 等）
+    # 使用仓库根目录的 .env 作为运行时环境变量文件（FEISHU_TEMPLATE_ID、AI_API_KEY 等）
     env_file:
-      - .env
+      - ../.env
 
     # 配置与运行时状态放在服务器本地（不会进入镜像/不会进入仓库）
     volumes:
       - ../data:/app/data
       - ../log:/app/log
-    # 可选：当前镜像已包含 `ffmpeg`，支持本地 ASR 音频处理与 CPU 执行。
+    # 当前镜像已包含 `ffmpeg`，支持本地 ASR 音频处理与 CPU 执行。
     # 即使宿主机安装了 NVIDIA Container Toolkit，单独启用 `gpus: all` 也不能让当前镜像直接获得 GPU ASR 能力，
     # 因为现有 Dockerfile 仍未打包 `faster_whisper` 所需的 CUDA/cuDNN 运行库。
-    # 如需容器内 GPU ASR，请改用或额外构建包含 CUDA/cuDNN 运行时的镜像，再按你的 Docker/Compose 版本声明 GPU 访问权限。
+    # 如需容器内 GPU ASR，请改用 `deploy/docker-compose.gpu.yml` 与 `Dockerfile.gpu`，也就是包含 CUDA/cuDNN 运行时的镜像。
     # 可选：如果你需要固定时区（也可以直接写进 .env）
     # environment:
     #   TZ: Asia/Shanghai

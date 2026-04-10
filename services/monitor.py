@@ -24,6 +24,7 @@ from config import build_bilibili_credential
 
 from .bilibili_auth import BilibiliAuth
 from .comment_fetcher import CommentFetcher
+from .feishu_docs import FeishuDocsService
 
 
 class ConfigFileWatcher:
@@ -240,17 +241,25 @@ class MonitorService:
     # 评论轮询最多翻页数：避免高流量动态过度请求
     _COMMENT_POLL_MAX_PAGES = 3
 
-    def __init__(self, feishu_bot=None, summarizer=None, cookie: Optional[str] = None):
+    def __init__(
+        self,
+        feishu_bot=None,
+        summarizer=None,
+        feishu_docs_service: Optional[FeishuDocsService] = None,
+        cookie: Optional[str] = None,
+    ):
         """
         初始化监控服务
 
         Args:
             feishu_bot: 飞书机器人实例
             summarizer: AI总结服务实例
+            feishu_docs_service: 飞书文档知识库服务实例
             cookie: 兼容旧参数（已不再使用，凭证改由 bilibili-api-python 管理）
         """
         self.feishu_bot = feishu_bot
         self.summarizer = summarizer
+        self.feishu_docs_service = feishu_docs_service
         self.cookie = cookie
         self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
 
@@ -1694,25 +1703,66 @@ class MonitorService:
 
         # AI总结
         summary_text = None
+        summary_markdown = None
+        summary_source = "subtitle"
+        knowledge_doc_url = None
         try:
             if self.summarizer is not None:
-                ok, message, links, contents = await self.summarizer.summarize_videos(
-                    [video_url]
-                )
-                if ok and contents and contents[0]:
-                    summary_text = f"**AI 总结**\n\n{contents[0]}"
-                    if links and links[0]:
-                        summary_text += f"\n\n[查看完整总结]({links[0]})"
-                elif ok and links:
-                    summary_text = f"[AI总结链接]({links[0]})"
+                if hasattr(self.summarizer, "summarize_video"):
+                    ok, message, result = await self.summarizer.summarize_video(
+                        video_url
+                    )
+                    if ok and result and result.summary_markdown:
+                        summary_markdown = result.summary_markdown
+                        summary_source = result.summary_source or "subtitle"
+                        summary_text = f"**AI 总结**\n\n{summary_markdown}"
+                    else:
+                        summary_text = f"AI总结失败：{message}"
                 else:
-                    detail = ""
-                    if contents and contents[0]:
-                        detail = f"\n\n{contents[0]}"
-                    summary_text = f"AI总结失败：{message}{detail}"
+                    (
+                        ok,
+                        message,
+                        links,
+                        contents,
+                    ) = await self.summarizer.summarize_videos([video_url])
+                    if ok and contents and contents[0]:
+                        summary_markdown = contents[0]
+                        summary_text = f"**AI 总结**\n\n{summary_markdown}"
+                        if links and links[0]:
+                            summary_text += f"\n\n[查看完整总结]({links[0]})"
+                    elif ok and links:
+                        summary_text = f"[AI总结链接]({links[0]})"
+                    else:
+                        detail = ""
+                        if contents and contents[0]:
+                            detail = f"\n\n{contents[0]}"
+                        summary_text = f"AI总结失败：{message}{detail}"
         except Exception as e:
             self.logger.error(f"AI总结异常: {e}")
             summary_text = f"AI总结异常：{str(e)}"
+
+        if summary_markdown and getattr(self, "feishu_docs_service", None):
+            try:
+                from services.ai_summary import VideoSummaryResult
+
+                knowledge_doc_url = await self.feishu_docs_service.upsert_video_summary(
+                    creator_uid=creator.uid,
+                    creator_name=creator.name,
+                    bvid=bvid,
+                    video_title=title,
+                    video_url=video_url,
+                    publish_time=self.get_publish_time(item),
+                    summary=VideoSummaryResult(
+                        video_url=video_url,
+                        summary_source=summary_source,
+                        summary_markdown=summary_markdown,
+                    ),
+                )
+            except Exception as e:
+                self.logger.error("写入飞书知识库异常: %s", str(e))
+
+        if summary_text and knowledge_doc_url:
+            summary_text += f"\n\n[知识库文档]({knowledge_doc_url})"
 
         if summary_text:
             markdown_content += f"\n\n{summary_text}"

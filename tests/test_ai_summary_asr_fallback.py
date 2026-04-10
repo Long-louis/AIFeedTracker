@@ -126,6 +126,33 @@ class TestAISummaryASRFallback(unittest.IsolatedAsyncioTestCase):
             video_url
         )
 
+    async def test_summarize_video_returns_single_markdown_result(self):
+        service = self.create_service()
+        service.local_asr_enabled = True
+        service.subtitle_fetcher.fetch_subtitle = AsyncMock(return_value=None)
+        service.subtitle_fetcher.last_error_type = SubtitleErrorType.NO_SUBTITLE
+        service.subtitle_fetcher.last_error = "视频无平台字幕"
+        service.audio_transcription_service = AsyncMock()
+        service.audio_transcription_service.transcribe_video = AsyncMock(
+            return_value={
+                "text": "本地ASR转写文本",
+                "text_source": "local_asr",
+            }
+        )
+        service.summary_generator.generate_summary = AsyncMock(
+            return_value="## 关键信息和观点\n- 要点\n\n## 时间线总结\n- 00:00 开场"
+        )
+        video_url = "https://www.bilibili.com/video/BV1xx411c7mD"
+
+        ok, message, result = await service.summarize_video(video_url)
+
+        self.assertTrue(ok)
+        self.assertEqual(message, "成功总结 1 个视频")
+        self.assertIsNotNone(result)
+        self.assertEqual(result.summary_source, "local_asr")
+        self.assertIn("## 关键信息和观点", result.summary_markdown)
+        self.assertFalse(hasattr(result, "key_points_markdown"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,15 @@
+.git
+.github
+.opencode
+.venv
+.worktrees
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.python-version
+.env
+data/*.json
+log/
+temp/
+tests/
+docs/superpowers/

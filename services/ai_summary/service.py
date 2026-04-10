@@ -6,7 +6,8 @@ AI总结服务主模块
 """
 
 import logging
-from typing import Dict, List, Tuple
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
 
 from config import AI_CONFIG, LOCAL_ASR_CONFIG
 
@@ -14,6 +15,13 @@ from .ai_client import AIClient
 from .audio_transcription_service import AudioTranscriptionService
 from .subtitle_fetcher import SubtitleErrorType, SubtitleFetcher
 from .summary_generator import SummaryGenerator
+
+
+@dataclass
+class VideoSummaryResult:
+    video_url: str
+    summary_source: str
+    summary_markdown: str
 
 
 class AISummaryService:
@@ -76,6 +84,87 @@ class AISummaryService:
     def _should_use_local_asr(self, error_type) -> bool:
         return self.local_asr_enabled and error_type == SubtitleErrorType.NO_SUBTITLE
 
+    def _format_subtitle_error(self, error_type, detail: Optional[str]) -> str:
+        if error_type == SubtitleErrorType.COOKIE_EXPIRED:
+            return f"❌ Cookie已失效: {detail}"
+        if error_type == SubtitleErrorType.CREDENTIAL_ERROR:
+            return f"❌ 凭证权限不足: {detail}"
+        if error_type == SubtitleErrorType.NO_SUBTITLE:
+            return f"❌ 视频无字幕: {detail}"
+        if error_type == SubtitleErrorType.VIDEO_NOT_FOUND:
+            return f"❌ 视频不存在: {detail}"
+        if error_type == SubtitleErrorType.NETWORK_ERROR:
+            return f"❌ 网络错误: {detail}"
+        if detail:
+            return f"❌ 获取字幕失败: {detail}"
+        return "❌ 获取字幕失败: 未知原因"
+
+    async def _summarize_single_video(
+        self, video_url: str
+    ) -> Tuple[Optional[VideoSummaryResult], Optional[str]]:
+        self.logger.info("步骤1: 获取字幕...")
+        subtitle = await self.subtitle_fetcher.fetch_subtitle(video_url)
+        summary_source = "subtitle"
+
+        if not subtitle:
+            error_type = self.subtitle_fetcher.last_error_type
+            detail = self.subtitle_fetcher.last_error
+
+            if self._should_use_local_asr(error_type):
+                self.logger.info("字幕缺失，进入本地ASR兜底: %s", video_url)
+                transcription_result = (
+                    await self.audio_transcription_service.transcribe_video(video_url)
+                )
+                if not transcription_result:
+                    asr_detail = getattr(
+                        self.audio_transcription_service, "last_error", None
+                    )
+                    if asr_detail:
+                        return None, f"❌ 本地转写失败: {asr_detail}"
+                    return None, "❌ 本地转写失败: 未知原因"
+                subtitle = transcription_result.get("text")
+                summary_source = str(
+                    transcription_result.get("text_source") or "local_asr"
+                )
+                self.logger.info("本地ASR转写成功，继续生成总结: %s", video_url)
+            else:
+                return None, self._format_subtitle_error(error_type, detail)
+
+        self.logger.info("字幕获取成功，长度: %s 字符", len(subtitle))
+
+        self.logger.info("步骤2: 生成AI总结...")
+        summary = await self.summary_generator.generate_summary(subtitle)
+        if not summary:
+            detail = getattr(self.ai_client, "last_error", None)
+            if detail:
+                return None, f"❌ AI总结生成失败: {detail}"
+            return None, "❌ AI总结生成失败"
+
+        self.logger.info("总结生成成功，长度: %s 字符", len(summary))
+        return (
+            VideoSummaryResult(
+                video_url=video_url,
+                summary_source=summary_source,
+                summary_markdown=summary,
+            ),
+            None,
+        )
+
+    async def summarize_video(
+        self, video_url: str
+    ) -> Tuple[bool, str, Optional[VideoSummaryResult]]:
+        """总结单个视频并返回结构化结果。"""
+        try:
+            result, error = await self._summarize_single_video(video_url)
+            if result:
+                return True, "成功总结 1 个视频", result
+            return False, error or "❌ 处理失败: 未知原因", None
+        except Exception as e:
+            self.logger.error(
+                "处理视频失败: %s, 错误: %s", video_url, str(e), exc_info=True
+            )
+            return False, f"❌ 处理失败: {str(e)}", None
+
     async def summarize_videos(
         self, video_urls: List[str]
     ) -> Tuple[bool, str, List[str], List[str]]:
@@ -101,83 +190,12 @@ class AISummaryService:
                 )
 
                 try:
-                    # 1. 获取字幕
-                    self.logger.info("步骤1: 获取字幕...")
-                    subtitle = await self.subtitle_fetcher.fetch_subtitle(video_url)
-
-                    if not subtitle:
-                        error_type = self.subtitle_fetcher.last_error_type
-                        detail = self.subtitle_fetcher.last_error
-
-                        if self._should_use_local_asr(error_type):
-                            self.logger.info("字幕缺失，进入本地ASR兜底: %s", video_url)
-                            transcription_result = (
-                                await self.audio_transcription_service.transcribe_video(
-                                    video_url
-                                )
-                            )
-                            if transcription_result:
-                                subtitle = transcription_result["text"]
-                                self.logger.info(
-                                    "本地ASR转写成功，继续生成总结: %s", video_url
-                                )
-                            else:
-                                error_msg = f"本地转写失败: {video_url}"
-                                self.logger.error(error_msg)
-                                failed_videos.append(video_url)
-                                asr_detail = getattr(
-                                    self.audio_transcription_service, "last_error", None
-                                )
-                                if asr_detail:
-                                    summary_contents.append(
-                                        f"❌ 本地转写失败: {asr_detail}"
-                                    )
-                                else:
-                                    summary_contents.append("❌ 本地转写失败: 未知原因")
-                                continue
-                        else:
-                            error_msg = f"获取字幕失败: {video_url}"
-                            self.logger.error(error_msg)
-                            failed_videos.append(video_url)
-
-                            # 根据错误类型生成详细的失败原因
-                            if error_type == SubtitleErrorType.COOKIE_EXPIRED:
-                                summary_contents.append(f"❌ Cookie已失效: {detail}")
-                            elif error_type == SubtitleErrorType.CREDENTIAL_ERROR:
-                                summary_contents.append(f"❌ 凭证权限不足: {detail}")
-                            elif error_type == SubtitleErrorType.NO_SUBTITLE:
-                                summary_contents.append(f"❌ 视频无字幕: {detail}")
-                            elif error_type == SubtitleErrorType.VIDEO_NOT_FOUND:
-                                summary_contents.append(f"❌ 视频不存在: {detail}")
-                            elif error_type == SubtitleErrorType.NETWORK_ERROR:
-                                summary_contents.append(f"❌ 网络错误: {detail}")
-                            elif detail:
-                                summary_contents.append(f"❌ 获取字幕失败: {detail}")
-                            else:
-                                summary_contents.append("❌ 获取字幕失败: 未知原因")
-                            continue
-
-                    self.logger.info(f"字幕获取成功，长度: {len(subtitle)} 字符")
-
-                    # 2. 生成总结
-                    self.logger.info("步骤2: 生成AI总结...")
-                    summary = await self.summary_generator.generate_summary(subtitle)
-
-                    if not summary:
-                        error_msg = f"生成总结失败: {video_url}"
-                        self.logger.error(error_msg)
+                    result, error_text = await self._summarize_single_video(video_url)
+                    if result:
+                        summary_contents.append(result.summary_markdown)
+                    else:
                         failed_videos.append(video_url)
-                        detail = getattr(self.ai_client, "last_error", None)
-                        if detail:
-                            summary_contents.append(f"❌ AI总结生成失败: {detail}")
-                        else:
-                            summary_contents.append("❌ AI总结生成失败")
-                        continue
-
-                    self.logger.info(f"总结生成成功，长度: {len(summary)} 字符")
-
-                    # 3. 添加到结果
-                    summary_contents.append(summary)
+                        summary_contents.append(error_text or "❌ 处理失败: 未知原因")
                     self.logger.info(f"视频 {i + 1} 处理完成")
 
                 except Exception as e:

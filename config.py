@@ -109,6 +109,24 @@ def load_local_asr_config() -> dict:
     }
 
 
+def load_feishu_docs_config() -> dict:
+    return {
+        "enabled": _get_env_bool("FEISHU_DOCS_ENABLED", False),
+        "app_id": _get_env_str("FEISHU_DOCS_APP_ID", FEISHU_APP_ID),
+        "app_secret": _get_env_str("FEISHU_DOCS_APP_SECRET", FEISHU_APP_SECRET),
+        "wiki_space_id": _get_env_str("FEISHU_DOCS_WIKI_SPACE_ID", ""),
+        "root_node_token": _get_env_str("FEISHU_DOCS_ROOT_NODE_TOKEN", ""),
+        "root_title": _get_env_str("FEISHU_DOCS_ROOT_TITLE", "AI视频知识库"),
+        "state_path": _get_env_str(
+            "FEISHU_DOCS_STATE_PATH",
+            str(project_root / "data" / "feishu_doc_state.json"),
+        ),
+        "request_timeout_seconds": _get_env_int(
+            "FEISHU_DOCS_REQUEST_TIMEOUT_SECONDS", 30
+        ),
+    }
+
+
 # AI总结服务配置
 AI_CONFIG = {
     "service": os.getenv("AI_SERVICE", "deepseek"),
@@ -126,6 +144,7 @@ AI_CONFIG = {
 }
 
 LOCAL_ASR_CONFIG = load_local_asr_config()
+FEISHU_DOCS_CONFIG = load_feishu_docs_config()
 
 # 反爬虫配置
 ANTI_BAN_CONFIG = {

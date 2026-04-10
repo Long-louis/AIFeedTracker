@@ -42,6 +42,15 @@ class TestPublicReadme(unittest.TestCase):
         content = Path("README.md").read_text(encoding="utf-8")
         self.assertIn("faster_whisper", content)
 
+    def test_readme_mentions_public_gpu_deploy_path(self):
+        content = Path("README.md").read_text(encoding="utf-8")
+        self.assertIn("deploy/docker-compose.gpu.yml", content)
+        self.assertIn("NVIDIA Container Toolkit", content)
+
+    def test_readme_mentions_feishu_docs_kb_setting_entry(self):
+        content = Path("README.md").read_text(encoding="utf-8")
+        self.assertIn("FEISHU_DOCS_*", content)
+
 
 if __name__ == "__main__":
     unittest.main()

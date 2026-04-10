@@ -1,0 +1,24 @@
+services:
+  ai-feed-tracker:
+    # GPU 方案要求宿主机已安装 NVIDIA Container Toolkit。
+    build:
+      context: ..
+      dockerfile: Dockerfile.gpu
+    container_name: ai-feed-tracker-gpu
+    restart: unless-stopped
+    runtime: nvidia
+
+    # 复用仓库根目录 .env，避免维护第二份部署配置。
+    env_file:
+      - ../.env
+
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
+    volumes:
+      - ../data:/app/data
+      - ../log:/app/log
+
+    # 仅提供容器级 GPU 运行时；是否真正启用本地 ASR 仍取决于 .env 中的应用配置。
+    # 典型 GPU 配置：LOCAL_ASR_ENABLED=true、LOCAL_ASR_DEVICE=cuda、LOCAL_ASR_COMPUTE_TYPE=float16

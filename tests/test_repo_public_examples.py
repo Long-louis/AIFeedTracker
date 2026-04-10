@@ -36,6 +36,18 @@ class TestRepoPublicExamples(unittest.TestCase):
         self.assertIn("faster_whisper", content)
         self.assertNotIn("deploy/.env.example", content)
 
+    def test_env_example_mentions_optional_gpu_asr_path(self):
+        content = Path("env.example").read_text(encoding="utf-8")
+        self.assertIn("LOCAL_ASR_DEVICE=cuda", content)
+        self.assertIn("LOCAL_ASR_COMPUTE_TYPE=float16", content)
+        self.assertIn("deploy/docker-compose.gpu.yml", content)
+
+    def test_env_example_mentions_feishu_docs_kb_settings(self):
+        content = Path("env.example").read_text(encoding="utf-8")
+        self.assertIn("FEISHU_DOCS_ENABLED", content)
+        self.assertIn("FEISHU_DOCS_WIKI_SPACE_ID", content)
+        self.assertIn("FEISHU_DOCS_STATE_PATH", content)
+
 
 if __name__ == "__main__":
     unittest.main()

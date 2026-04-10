@@ -18,6 +18,7 @@ from config import get_config_status
 # 导入核心模块
 from core import configure_logging
 from services import FeishuBot, MonitorService
+from services.feishu_docs import FeishuDocsService
 
 # 导入服务模块
 from services.ai_summary import AISummaryService
@@ -41,6 +42,7 @@ class AIVideoBot:
         # 初始化服务
         self.feishu_bot = FeishuBot()
         self.ai_service = AISummaryService(feishu_bot=self.feishu_bot)  # 使用AI总结服务
+        self.feishu_docs_service = FeishuDocsService()
 
         self.logger.info("AI视频机器人初始化完成")
 
@@ -139,7 +141,9 @@ class AIVideoBot:
 
             # 创建监控服务
             monitor_service = MonitorService(
-                feishu_bot=self.feishu_bot, summarizer=self.ai_service
+                feishu_bot=self.feishu_bot,
+                summarizer=self.ai_service,
+                feishu_docs_service=self.feishu_docs_service,
             )
 
             # 加载创作者列表

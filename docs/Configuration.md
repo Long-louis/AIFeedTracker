@@ -1,6 +1,8 @@
 # 配置总入口（Configuration）
 
-## 1) 初始化项目
+这份文档只做一件事：帮你把项目跑起来。
+
+## 1) 先初始化
 
 ```bash
 uv sync --frozen
@@ -9,140 +11,100 @@ cp data/feishu_channels.json.example data/feishu_channels.json
 cp data/bilibili_creators.json.example data/bilibili_creators.json
 ```
 
-## 2) `.env` 必填项
+本仓库开发和 E2E 使用同一个根目录 `.env`，不需要拆成多个 dotenv 文件。
 
-### B 站凭证
+## 2) `.env` 里最重要的字段
 
-硬性必填：
+### B 站登录
 
-- `SESSDATA`
-
-按刷新/兼容场景建议配置：
-
-- `bili_jct`
-- `buvid3`
-- `DedeUserID`
-- `ac_time_value`
-
-可选：`buvid4`、`refresh_token`、`USER_AGENT`。
+- 必填：`SESSDATA`
+- 强烈建议：`bili_jct`、`buvid3`、`DedeUserID`、`ac_time_value`
 
 `ac_time_value` 可在已登录 B 站页面控制台执行 `window.localStorage.ac_time_value` 获取。
 
-### 飞书卡片模板
+### 飞书卡片
 
 - `FEISHU_TEMPLATE_ID`
 - `FEISHU_TEMPLATE_VERSION`
 
-可直接使用仓库卡片模板文件：`docs/博主更新订阅.card`。
+卡片模板文件在：`docs/博主更新订阅.card`。
 
 ### AI 总结
 
-- `AI_SERVICE`（可选，默认 `deepseek`；支持 `deepseek` / `zhipu` / `qwen`）
 - `AI_API_KEY`（必填）
+- `AI_SERVICE`（可选，默认 `deepseek`）
 
-当前运行时会初始化 `AISummaryService`；未设置 `AI_API_KEY` 时会初始化失败并导致启动报错。
+注意：`AI_API_KEY` 缺失时，`AISummaryService` 会直接报错，不会静默跳过。
 
-## 3) 飞书消息通道配置（`data/feishu_channels.json`）
+## 3) `data/` 里的两个配置文件
 
-支持两类通道：
+### `data/feishu_channels.json`
 
-- `app:<name>`（推荐）
-- `webhook:<name>`
+- 推荐使用 `app:*` 通道
+- 也支持 `webhook:*`
+- 示例默认：`defaults.content = app:default`，`defaults.alert = app:alerts`
 
-示例默认走应用通道：
+`apps.<name>` 里最关键的字段：`app_id`、`app_secret`、`receive_id_type`、`receive_id`。
 
-- `defaults.content = app:default`
-- `defaults.alert = app:alerts`
+### `data/bilibili_creators.json`
 
-`apps.<name>` 关键字段：
-
-- `app_id`
-- `app_secret`
-- `receive_id_type`（`chat_id` / `open_id` / `user_id` / `union_id` / `email`）
-- `receive_id`
-
-如果从旧版本升级，请按示例文件刷新本地配置；旧字段 `user_open_id` 不再使用。
-
-## 4) 监控对象配置（`data/bilibili_creators.json`）
-
-每个条目至少包含：
+每个 UP 至少要有：
 
 - `uid`
 - `name`
 
-`crons` 为可选；未配置时回退为 `check_interval` 间隔轮询模式（默认 300 秒）。
+可选字段：`crons`、`check_interval`、`feishu_channel`。
 
-可选：`feishu_channel`，用于按博主覆盖默认通道（支持 `app:*` / `webhook:*`）。
+## 4) 可选能力 A：ASR 回退（高级）
 
-## 5) AI 总结与 ASR 回退（SenseVoice API）
+默认流程先用 B 站字幕。
 
-视频总结固定输出两个模块：
+如果你想在“无字幕视频”场景继续生成总结，再开启 ASR 回退：
 
-- `## 关键信息和观点`
-- `## 时间线总结`
-
-ASR 回退为可选能力，主应用通过 HTTP 调用外部 SenseVoice API 服务：
-
-- `LOCAL_ASR_ENABLED=false`：关闭
-- `LOCAL_ASR_ENABLED=true`：在字幕缺失时启用回退
+- `LOCAL_ASR_ENABLED=true`
 - `LOCAL_ASR_PROVIDER=sensevoice_api`
-- `ASR_API_URL`：SenseVoice API 地址（例如 `http://127.0.0.1:8900/v1/transcribe`）
-- `ASR_API_TIMEOUT_SECONDS`：ASR 请求超时秒数
+- `ASR_API_URL=http://127.0.0.1:8900/v1/transcribe`
+- `ASR_API_TIMEOUT_SECONDS=300`
 
-主应用容器路径：`deploy/docker-compose.yml` / `deploy/docker-compose.gpu.yml`
+主服务通过 HTTP 调用外部 ASR，不在主进程内跑 Whisper。
 
-ASR 服务容器路径：`asr_service/deploy/docker-compose.yml`
+- 主服务 Docker：`deploy/docker-compose.yml`、`deploy/docker-compose.gpu.yml`
+- ASR 服务 Docker：`asr_service/deploy/docker-compose.yml`
+- ASR 详细部署：`asr_service/README.md`
 
-若 ASR 服务使用 GPU 推理，宿主机需先安装 NVIDIA Container Toolkit。
+## 5) 可选能力 B：飞书知识库写入
 
-## 6) 飞书知识库写入（可选）
-
-开启项：
+开启所需字段：
 
 - `FEISHU_DOCS_ENABLED=true`
 - `FEISHU_DOCS_APP_ID`
 - `FEISHU_DOCS_APP_SECRET`
 - `FEISHU_DOCS_WIKI_SPACE_ID`
 
-可选：`FEISHU_DOCS_ROOT_NODE_TOKEN`、`FEISHU_DOCS_ROOT_TITLE`、`FEISHU_DOCS_STATE_PATH`。
+目录结构是：`根 -> 博主 -> YYYY-MM -> 视频文档`。
 
-知识库目录结构：`根 -> 博主 -> YYYY-MM -> 视频文档`。
+关键行为：
 
-说明：
+- 写入失败不阻断消息推送
+- 写入成功后，会在消息 `AI 总结` 末尾追加知识库链接
+- 开通 `docx:document.block:convert` 后，Markdown 会转成带样式的文档块
 
-- 文档写入失败不会阻断飞书消息发送。
-- 写入成功时，会在消息 `AI 总结` 末尾追加知识库链接。
-- 开通 `docx:document.block:convert` 可将 Markdown 转为带样式文档块；未开通会回退为纯文本块。
+## 6) 常用运行命令
 
-## 7) 运行与排查
+- 持续运行：`uv run python main.py --mode service`
+- 单次检查：`uv run python main.py --mode monitor --once`
+- 重置状态并单次检查：`uv run python main.py --mode monitor --reset --once`
+- 全量测试：`uv run python -m unittest discover -s tests -p "test_*.py" -q`
 
-单次验证：
+## 7) 升级时要做的事
 
-```bash
-uv run python main.py --mode monitor --once
-```
+每次升级后，请对照示例文件刷新本地配置：
 
-持续运行：
+- `env.example`
+- `data/feishu_channels.json.example`
+- `data/bilibili_creators.json.example`
 
-```bash
-uv run python main.py --mode service
-```
+## 8) 二次开发建议阅读
 
-若出现登录失效，服务会尝试刷新凭证，必要时触发二维码登录。
-
-## 8) 升级配置刷新
-
-当 `env.example` 或 `data/*.json.example` 结构变化时，请手动同步本地：
-
-- `.env`
-- `data/feishu_channels.json`
-- `data/bilibili_creators.json`
-
-## 9) 架构模式速览（便于二次开发）
-
-- 编排层与能力层分离：`main.py:203`、`services/monitor.py:212`
-- 配置集中构建并在 import 时加载：`config.py:22`
-- 注册表驱动通道路由：`services/feishu_channels.py:27`
-- 状态文件保证幂等：`services/monitor.py:135`、`services/feishu_docs.py:427`
-- 次级输出非阻断：`services/monitor.py:1744`
-- 失败时自动降级（如文档块转换失败回退纯文本）：`services/feishu_docs.py:237`
+- 架构模式：`docs/architectural_patterns.md`
+- 文档索引：`docs/README.md`

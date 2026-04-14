@@ -1,43 +1,54 @@
-# SenseVoice FastAPI Service
+# SenseVoice ASR Service（可选模块）
 
-Standalone ASR service based on FunASR + SenseVoice (`iic/SenseVoiceSmall`) for NVIDIA GPU environments.
+这是主项目的可选 ASR 服务。
 
-## Prerequisites
+当视频没有字幕时，主项目可以调用这个服务继续生成总结。
 
-- Docker Engine with Docker Compose plugin (or legacy `docker-compose`).
-- NVIDIA Container Toolkit configured on host (GPU passthrough must work).
-- NVIDIA GPU driver compatible with CUDA 12.4 runtime images.
-- Internet access for first model download, or pre-warmed cache under `asr_service/cache/modelscope`.
+## 1) 你需要准备什么
 
-## API
+- Docker（支持 `docker compose` 或 `docker-compose`）
+- 如果用 GPU：已安装 NVIDIA Container Toolkit
+- 首次启动需要联网下载模型，后续会走本地缓存
 
-- `GET /health`: service status and model readiness.
-- `POST /v1/transcribe`: multipart upload with field `file`; returns `text`, and `segments` when `include_segments=true`.
+## 2) API 很简单
 
-Example:
+- `GET /health`：检查服务是否可用、模型是否就绪
+- `POST /v1/transcribe`：上传音频，返回识别文本
+
+示例：
 
 ```bash
 curl -X POST "http://127.0.0.1:8900/v1/transcribe?include_segments=true" \
   -F "file=@/path/to/audio.wav"
 ```
 
-## Docker deployment
-
-Use an isolated folder for this service (any path you manage). Do not run it by mounting from a development workspace.
+## 3) Docker 启动
 
 ```bash
-# 1) Copy asr_service/ to your deployment folder
-cd <asr-service-deploy-folder>/deploy
+cd asr_service/deploy
 docker compose up -d --build || docker-compose up -d --build
 ```
 
-The compose file mounts `../cache/modelscope` (relative to your deployment folder), so model cache stays with the ASR service and does not depend on your source repo location.
+说明：
 
-## Runtime notes
+- 模型缓存目录是 `asr_service/cache/modelscope`
+- 容器里对应路径是 `/home/app/.cache/modelscope`
+- 请保证主机目录可写
 
-- Container runs as non-root user `app`.
-- Upload size is limited by `ASR_MAX_UPLOAD_BYTES` (default: `26214400`, 25 MiB).
-- Long audio is split into chunks before inference (`ASR_SEGMENT_SECONDS`, default: `45`) to reduce memory pressure.
-- `/v1/transcribe` accepts only audio MIME types (`audio/*`).
-- Model cache is mounted to `/home/app/.cache/modelscope`; keep write permission for host path.
-- `/health` reports readiness and a coarse error marker only; detailed failures stay in container logs.
+## 4) 和主项目对接
+
+在主项目 `.env` 里设置：
+
+```env
+LOCAL_ASR_ENABLED=true
+LOCAL_ASR_PROVIDER=sensevoice_api
+ASR_API_URL=http://127.0.0.1:8900/v1/transcribe
+ASR_API_TIMEOUT_SECONDS=300
+```
+
+## 5) 常见运行参数
+
+- `ASR_MAX_UPLOAD_BYTES`：单次上传大小限制，默认 25 MiB
+- `ASR_SEGMENT_SECONDS`：长音频分段秒数，默认 45
+
+这两个参数用于控制稳定性和内存占用。

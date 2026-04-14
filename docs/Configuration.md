@@ -42,7 +42,7 @@ cp data/bilibili_creators.json.example data/bilibili_creators.json
 
 - 推荐使用 `app:*` 通道
 - 也支持 `webhook:*`
-- 示例默认：`defaults.content = app:default`，`defaults.alert = app:alerts`
+- 推荐组合：`defaults.content = app:default`，`defaults.alert = webhook:alerts`
 
 `apps.<name>` 里最关键的字段：`app_id`、`app_secret`、`receive_id_type`、`receive_id`。
 
@@ -68,7 +68,7 @@ cp data/bilibili_creators.json.example data/bilibili_creators.json
 
 主服务通过 HTTP 调用外部 ASR，不在主进程内跑 Whisper。
 
-- 主服务 Docker：`deploy/docker-compose.yml`、`deploy/docker-compose.gpu.yml`
+- 主服务 Docker：`deploy/docker-compose.yml`
 - ASR 服务 Docker：`asr_service/deploy/docker-compose.yml`
 - ASR 详细部署：`asr_service/README.md`
 
@@ -81,12 +81,25 @@ cp data/bilibili_creators.json.example data/bilibili_creators.json
 - `FEISHU_DOCS_APP_SECRET`
 - `FEISHU_DOCS_WIKI_SPACE_ID`
 
+飞书应用建议至少开通这些权限（用于“消息推送 + 知识库写入”）：
+
+- `im:message`（应用向群发送消息）
+- `im:chat:readonly`（按群名称查找 chat_id）
+- `wiki:wiki`（创建/查询知识库节点）
+- `docx:document`（写入文档内容）
+- `docx:document.block:convert`（把 Markdown 转为有样式的文档块）
+
+可选：
+
+- `im:url_preview.update`（增强链接预览稳定性）
+- `wiki:wiki:readonly`、`docx:document:readonly`（只读排查）
+
 目录结构是：`根 -> 博主 -> YYYY-MM -> 视频文档`。
 
 关键行为：
 
 - 写入失败不阻断消息推送
-- 写入成功后，会在消息 `AI 总结` 末尾追加知识库链接
+- 写入成功后，消息会附带知识库链接（优先用租户域名 wiki 链接）
 - 开通 `docx:document.block:convert` 后，Markdown 会转成带样式的文档块
 
 ## 6) 常用运行命令

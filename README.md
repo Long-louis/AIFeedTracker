@@ -1,7 +1,7 @@
 # AI Feed Tracker
 
 ![Python Version](https://img.shields.io/badge/python-3.11%2B-blue)
-![License](https://img.shields.io/badge/license-MIT-green)
+![License](https://img.shields.io/badge/license-CC%20BY--NC--SA%204.0-blue)
 
 AI Feed Tracker 用来做三件事：
 
@@ -9,20 +9,31 @@ AI Feed Tracker 用来做三件事：
 - 发送飞书通知卡片
 - 为视频生成 AI 总结（可选写入飞书知识库）
 
-## 你可以先从这里开始
+## 快速开始
 
-1. 安装依赖
-2. 填写配置
-3. 启动服务
+先准备配置文件（两种部署方式都需要）：
 
 ```bash
 git clone https://github.com/Long-louis/AIFeedTracker.git
 cd AIFeedTracker
-uv sync --frozen
 cp env.example .env
 cp data/feishu_channels.json.example data/feishu_channels.json
 cp data/bilibili_creators.json.example data/bilibili_creators.json
+```
+
+然后二选一：
+
+### 方式 A：本地运行（uv）
+
+```bash
+uv sync --frozen
 uv run python main.py --mode service
+```
+
+### 方式 B：Docker Compose（主服务）
+
+```bash
+docker-compose -f deploy/docker-compose.yml up -d --build
 ```
 
 ## 主要功能
@@ -32,34 +43,12 @@ uv run python main.py --mode service
 - AI 总结需要 `AI_API_KEY`，未配置时启动会直接报错
 - 飞书知识库写入为可选能力，写入失败不会阻断消息发送
 
-## Docker 部署（主服务）
-
-仓库提供两条公开部署路径：
-
-- CPU：`deploy/docker-compose.yml`
-- GPU：`deploy/docker-compose.gpu.yml`（宿主机先安装 NVIDIA Container Toolkit）
-
-CPU：
-
-```bash
-cp env.example .env
-cp data/feishu_channels.json.example data/feishu_channels.json
-cp data/bilibili_creators.json.example data/bilibili_creators.json
-docker-compose -f deploy/docker-compose.yml up -d --build
-```
-
-GPU：
-
-```bash
-cp env.example .env
-cp data/feishu_channels.json.example data/feishu_channels.json
-cp data/bilibili_creators.json.example data/bilibili_creators.json
-docker-compose -f deploy/docker-compose.gpu.yml up -d --build
-```
-
-如果你使用 Docker Compose 插件，可把 `docker-compose` 替换为 `docker compose`。
-
 ## 高级可选模块：外部 ASR 服务
+
+主服务和 ASR 服务已经拆分：
+
+- 主服务（本仓库根目录）负责监控、通知、AI 总结编排
+- ASR 服务（`asr_service/`）是可选独立模块，按需单独部署
 
 默认情况下，主服务先使用 B 站字幕。
 
@@ -82,6 +71,10 @@ docker-compose -f deploy/docker-compose.gpu.yml up -d --build
 - `data/feishu_channels.json.example`
 - `data/bilibili_creators.json.example`
 
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=Long-louis/AIFeedTracker&type=Date)](https://www.star-history.com/#Long-louis/AIFeedTracker&Date)
+
 ## 许可证
 
-本项目使用 [MIT License](LICENSE)。
+本项目使用 [CC BY-NC-SA 4.0](LICENSE)（署名-非商用-相同方式共享）。

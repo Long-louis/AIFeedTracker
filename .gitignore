@@ -26,6 +26,8 @@ browser_data/
 .cursor/
 .worktrees/
 docs/superpowers/
+opencode.jsonc
+.opencode/
 
 # Server-local deploy files
 deploy/.env

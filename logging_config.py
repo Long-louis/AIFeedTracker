@@ -26,28 +26,23 @@ def configure_logging(
     """
     os.makedirs(log_dir, exist_ok=True)
 
-    # 配置根logger
     root_logger = logging.getLogger()
     root_logger.setLevel(level)
 
-    # 避免重复添加处理器
     if not root_logger.handlers:
         formatter = logging.Formatter(
             fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S",
         )
 
-        # 控制台处理器 - 设置UTF-8编码避免Windows乱码
         import sys
 
         console_handler = logging.StreamHandler(sys.stdout)
         console_handler.setFormatter(formatter)
         console_handler.setLevel(level)
-        # 确保控制台输出使用UTF-8编码
         if hasattr(sys.stdout, "reconfigure"):
             sys.stdout.reconfigure(encoding="utf-8")
 
-        # 文件处理器
         log_path = os.path.join(log_dir, log_file)
         file_handler = logging.FileHandler(log_path, encoding="utf-8")
         file_handler.setFormatter(formatter)

@@ -270,6 +270,7 @@ class _FakeFeishuBot:
     def __init__(self):
         self.notifications = []
         self.cards = []
+        self.texts = []
         self.uploaded_paths = []
 
     async def upload_local_image(self, path):
@@ -298,6 +299,10 @@ class _FakeFeishuBot:
                 "addition_subtitle": addition_subtitle,
             }
         )
+        return True
+
+    async def send_text(self, text, channel=None):
+        self.texts.append({"text": text, "channel": channel})
         return True
 
 
@@ -601,7 +606,7 @@ class TestMonitorDynamicSendPath(unittest.IsolatedAsyncioTestCase):
 
         class _FakeDocsService:
             async def upsert_video_summary(self, **kwargs):
-                return "https://feishu.cn/docx/knowledge-doc"
+                return "https://tenant.feishu.cn/wiki/knowledge-doc"
 
         monitor.summarizer = _FakeSummarizer()
         monitor.feishu_docs_service = _FakeDocsService()
@@ -648,10 +653,15 @@ class TestMonitorDynamicSendPath(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(monitor.feishu_bot.cards), 1)
         content = monitor.feishu_bot.cards[0]["markdown_content"]
-        ai_index = content.find("**AI 总结**")
-        kb_index = content.find("[知识库文档](https://feishu.cn/docx/knowledge-doc)")
-        self.assertGreaterEqual(ai_index, 0)
-        self.assertGreater(kb_index, ai_index)
+        self.assertIn("**AI 总结**", content)
+        self.assertIn("已写入飞书知识库", content)
+        self.assertNotIn("## 关键信息和观点", content)
+        self.assertNotIn("## 时间线总结", content)
+        self.assertEqual(len(monitor.feishu_bot.texts), 1)
+        self.assertEqual(
+            monitor.feishu_bot.texts[0]["text"],
+            "https://tenant.feishu.cn/wiki/knowledge-doc",
+        )
 
 
 if __name__ == "__main__":

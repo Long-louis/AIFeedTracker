@@ -23,6 +23,7 @@ class FeishuDocsService:
 
     _API_BASE = "https://open.feishu.cn/open-apis"
     _MARKDOWN_CONVERT_SCOPE = "docx:document.block:convert"
+    _DOC_CHILDREN_BATCH_SIZE = 50
 
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
@@ -211,11 +212,11 @@ class FeishuDocsService:
             token=token,
             payload=payload,
         )
-        node = data.get("node") or data
+        node = data.get("node") if isinstance(data.get("node"), dict) else data
         return {
-            "node_token": str(node.get("node_token") or ""),
-            "obj_token": str(node.get("obj_token") or ""),
-            "url": str(node.get("url") or ""),
+            "node_token": str(node.get("node_token") or data.get("node_token") or ""),
+            "obj_token": str(node.get("obj_token") or data.get("obj_token") or ""),
+            "url": str(data.get("url") or node.get("url") or ""),
         }
 
     async def _replace_doc_content(
@@ -226,12 +227,14 @@ class FeishuDocsService:
         if not blocks:
             return
 
-        for index in range(0, len(blocks), 1000):
+        for index in range(0, len(blocks), self._DOC_CHILDREN_BATCH_SIZE):
             await self._request_json(
                 "POST",
                 f"/docx/v1/documents/{doc_token}/blocks/{doc_token}/children",
                 token=token,
-                payload={"children": blocks[index : index + 1000]},
+                payload={
+                    "children": blocks[index : index + self._DOC_CHILDREN_BATCH_SIZE]
+                },
             )
 
     async def _convert_markdown_to_blocks(

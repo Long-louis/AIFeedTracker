@@ -1783,7 +1783,7 @@ class MonitorService:
                 self.logger.error("写入飞书知识库异常: %s", str(e))
 
         if summary_text and knowledge_doc_url:
-            summary_text += f"\n\n[知识库文档]({knowledge_doc_url})"
+            summary_text = "**AI 总结**\n\n已写入飞书知识库，完整内容见下条链接预览。"
 
         if summary_text:
             markdown_content += f"\n\n{summary_text}"
@@ -1798,6 +1798,11 @@ class MonitorService:
                 addition_title=rendered["addition_title"],
                 addition_subtitle=rendered["addition_subtitle"],
             )
+            if knowledge_doc_url and hasattr(self.feishu_bot, "send_text"):
+                await self.feishu_bot.send_text(
+                    knowledge_doc_url,
+                    channel=creator.feishu_channel,
+                )
 
     async def _fetch_video_comments(
         self, bvid: str, video_title: str, creator: Creator

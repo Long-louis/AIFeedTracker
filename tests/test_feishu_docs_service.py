@@ -209,5 +209,64 @@ class TestFeishuDocsMarkdownConvert(unittest.IsolatedAsyncioTestCase):
             )
 
 
+class TestFeishuDocsReplaceContent(unittest.IsolatedAsyncioTestCase):
+    async def test_replace_doc_content_sends_children_in_batches_of_50(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = f"{tmpdir}/feishu_doc_state.json"
+            service = FeishuDocsService(
+                {
+                    "enabled": True,
+                    "app_id": "app-id",
+                    "app_secret": "app-secret",
+                    "wiki_space_id": "space-token",
+                    "root_node_token": "",
+                    "root_title": "AI视频知识库",
+                    "state_path": state_path,
+                    "request_timeout_seconds": 5,
+                }
+            )
+            batch_sizes = []
+
+            async def _fake_request_json(method, path, **kwargs):
+                if method == "GET" and path.endswith("children?page_size=500"):
+                    return {"items": []}
+                if method == "POST" and path == "/docx/v1/documents/blocks/convert":
+                    return {
+                        "children": [
+                            {
+                                "block_type": 2,
+                                "text": {
+                                    "elements": [
+                                        {
+                                            "text_run": {
+                                                "content": f"line-{i}",
+                                            }
+                                        }
+                                    ]
+                                },
+                            }
+                            for i in range(120)
+                        ]
+                    }
+                if (
+                    method == "POST"
+                    and path == "/docx/v1/documents/doc-token/blocks/doc-token/children"
+                ):
+                    children = kwargs.get("payload", {}).get("children", [])
+                    batch_sizes.append(len(children))
+                    return {}
+                raise AssertionError(f"unexpected request: {method} {path}")
+
+            service._request_json = _fake_request_json  # type: ignore[method-assign]
+
+            await service._replace_doc_content(
+                token="token",
+                doc_token="doc-token",
+                markdown="## 关键信息和观点\n- A\n\n## 时间线总结\n- 00:00 B",
+            )
+
+            self.assertEqual(batch_sizes, [50, 50, 20])
+
+
 if __name__ == "__main__":
     unittest.main()

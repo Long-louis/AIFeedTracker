@@ -14,7 +14,7 @@ try:
     from dotenv import load_dotenv
 except ImportError:
 
-    def load_dotenv(*args, **kwargs):
+    def load_dotenv(*args, **kwargs) -> None:
         """备用函数，避免导入错误"""
         pass
 

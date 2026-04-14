@@ -157,12 +157,14 @@ class TestFeishuWebhookPayload(unittest.IsolatedAsyncioTestCase):
                             "default": {
                                 "app_id": "cli_123",
                                 "app_secret": "s1",
-                                "user_open_id": "u1",
+                                "receive_id_type": "chat_id",
+                                "receive_id": "oc_content",
                             },
                             "alerts": {
                                 "app_id": "cli_456",
                                 "app_secret": "s2",
-                                "user_open_id": "u2",
+                                "receive_id_type": "chat_id",
+                                "receive_id": "oc_alert",
                             },
                         },
                     },

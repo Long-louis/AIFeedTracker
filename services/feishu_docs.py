@@ -22,6 +22,7 @@ class FeishuDocsService:
     """把视频总结写入飞书知识库文档（根 -> 博主 -> YYYY-MM -> 视频文档）。"""
 
     _API_BASE = "https://open.feishu.cn/open-apis"
+    _MARKDOWN_CONVERT_SCOPE = "docx:document.block:convert"
 
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
@@ -221,17 +222,61 @@ class FeishuDocsService:
         self, token: str, doc_token: str, markdown: str
     ) -> None:
         await self._clear_doc_children(token, doc_token)
-        blocks = self._markdown_to_text_blocks(markdown)
+        blocks = await self._convert_markdown_to_blocks(token, markdown)
         if not blocks:
             return
 
-        for index in range(0, len(blocks), 50):
+        for index in range(0, len(blocks), 1000):
             await self._request_json(
                 "POST",
                 f"/docx/v1/documents/{doc_token}/blocks/{doc_token}/children",
                 token=token,
-                payload={"children": blocks[index : index + 50]},
+                payload={"children": blocks[index : index + 1000]},
             )
+
+    async def _convert_markdown_to_blocks(
+        self, token: str, markdown: str
+    ) -> List[Dict[str, Any]]:
+        normalized_markdown = (markdown or "").strip()
+        if not normalized_markdown:
+            normalized_markdown = "（暂无总结内容）"
+
+        try:
+            data = await self._request_json(
+                "POST",
+                "/docx/v1/documents/blocks/convert",
+                token=token,
+                payload={
+                    "content_type": "markdown",
+                    "content": normalized_markdown,
+                },
+            )
+            blocks = self._extract_converted_blocks(data)
+            if blocks:
+                return blocks
+            self.logger.warning("Markdown 转文档块接口返回空结果，回退为纯文本块")
+        except Exception as exc:
+            message = str(exc)
+            if self._MARKDOWN_CONVERT_SCOPE in message:
+                self.logger.warning(
+                    "缺少飞书权限 %s，文档将以纯文本块写入。请在应用权限中开通后重试。",
+                    self._MARKDOWN_CONVERT_SCOPE,
+                )
+            else:
+                self.logger.warning("Markdown 转文档块失败，回退为纯文本块: %s", exc)
+
+        return self._markdown_to_text_blocks(normalized_markdown)
+
+    @staticmethod
+    def _extract_converted_blocks(data: Dict[str, Any]) -> List[Dict[str, Any]]:
+        if not isinstance(data, dict):
+            return []
+
+        for key in ("children", "blocks", "items"):
+            value = data.get(key)
+            if isinstance(value, list):
+                return [item for item in value if isinstance(item, dict)]
+        return []
 
     async def _clear_doc_children(self, token: str, doc_token: str) -> None:
         data = await self._request_json(

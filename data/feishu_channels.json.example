@@ -1,7 +1,21 @@
 {
   "defaults": {
-    "content": "webhook:default",
-    "alert": "webhook:alerts"
+    "content": "app:default",
+    "alert": "app:alerts"
+  },
+  "apps": {
+    "default": {
+      "app_id": "cli_REPLACE_ME",
+      "app_secret": "REPLACE_ME",
+      "receive_id_type": "chat_id",
+      "receive_id": "oc_REPLACE_ME"
+    },
+    "alerts": {
+      "app_id": "cli_REPLACE_ME",
+      "app_secret": "REPLACE_ME",
+      "receive_id_type": "chat_id",
+      "receive_id": "oc_REPLACE_ME"
+    }
   },
   "webhooks": {
     "default": {

@@ -3,14 +3,14 @@
 ![Python Version](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-一个用于监控 B 站动态、推送飞书卡片，并可选生成 AI 视频总结的机器人服务。
+一个用于监控 B 站动态、推送飞书卡片，并生成 AI 视频总结的机器人服务。
 
 ## 功能概览
 
 - B 站动态监控，支持视频、图文、文字、直播等常见动态类型
-- 飞书模板卡片推送，支持多通道路由
-- 可选 AI 视频总结能力
-- 可选本地 ASR 回退：当视频字幕缺失时，可启用 `faster_whisper` 作为本地转写回退；`LOCAL_ASR_ENABLED=false` 可完全禁用，`LOCAL_ASR_DEVICE=cpu` 适用于无 GPU 环境
+- 飞书模板卡片推送，支持 `app:*` / `webhook:*` 通道路由（示例默认 `app:default`）
+- AI 视频总结能力（当前运行时会初始化 `AISummaryService`，需配置 `AI_API_KEY`，否则启动时报错）
+- 可选外部 ASR 回退：当视频字幕缺失时，可启用 SenseVoice API 服务进行转写回退（由主应用通过 HTTP 调用）
 - 可选飞书知识库写入：视频总结可写入飞书文档，并在消息 `AI 总结` 区块末尾附文档链接
 - B 站凭证刷新与二维码登录辅助
 
@@ -62,29 +62,38 @@ GPU 部署：
 cp env.example .env
 cp data/feishu_channels.json.example data/feishu_channels.json
 cp data/bilibili_creators.json.example data/bilibili_creators.json
-# 然后在 .env 中启用本地 ASR，并设置 LOCAL_ASR_DEVICE=cuda
 docker-compose -f deploy/docker-compose.gpu.yml up -d --build
 ```
 
-GPU 路径只提供容器运行时支持；要真正启用本地 GPU ASR，还需要在 `.env` 中至少配置：
+如果启用 ASR 回退，主应用改为调用外部 SenseVoice API 服务；在 `.env` 中至少配置：
 
 ```env
 LOCAL_ASR_ENABLED=true
-LOCAL_ASR_PROVIDER=faster_whisper
-LOCAL_ASR_DEVICE=cuda
-LOCAL_ASR_COMPUTE_TYPE=float16
+LOCAL_ASR_PROVIDER=sensevoice_api
+ASR_API_URL=http://127.0.0.1:8900/v1/transcribe
+ASR_API_TIMEOUT_SECONDS=300
 ```
+
+可选部署 SenseVoice ASR 服务：`asr_service/deploy/docker-compose.yml`。
+若使用 GPU 推理，请先在宿主机安装 NVIDIA Container Toolkit。
 
 ## 配置说明
 
-- B 站凭证配置：`docs/BILIBILI_SETUP.md`
-- 飞书卡片模板与通道配置：`docs/FEISHU_CARD_SETUP.md`
-- AI 总结配置：`docs/AI_SUMMARY_SETUP.md`
-- 飞书知识库配置：`docs/AI_SUMMARY_SETUP.md`（`FEISHU_DOCS_*`）
+- 统一配置与运行说明（推荐先看）：`docs/Configuration.md`
+- 文档索引：`docs/README.md`
+
+### 飞书知识库权限说明
+
+如果开启飞书知识库写入（`FEISHU_DOCS_ENABLED=true`），建议为应用开通 Markdown 转文档块所需权限：
+
+- `docx:document.block:convert`
+
+如果缺少该权限，系统会自动回退为纯文本块写入，不会阻断主消息推送。
 
 ## 升级提醒
 
 升级到新版本后，请同步检查 `.env` 与 `data/*.json` 配置文件是否仍与最新示例文件一致；如示例文件结构有变化，请手动更新你的本地配置文件。
+建议优先对照 `env.example`、`data/feishu_channels.json.example`、`data/bilibili_creators.json.example` 逐项刷新。
 
 ## 许可证
 

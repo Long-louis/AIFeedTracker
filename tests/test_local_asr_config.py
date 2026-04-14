@@ -10,13 +10,8 @@ from services.ai_summary.audio_transcription_service import AudioTranscriptionSe
 LOCAL_ASR_ENV_KEYS = [
     "LOCAL_ASR_ENABLED",
     "LOCAL_ASR_PROVIDER",
-    "LOCAL_ASR_MODEL",
-    "LOCAL_ASR_DEVICE",
-    "LOCAL_ASR_COMPUTE_TYPE",
-    "LOCAL_ASR_LANGUAGE",
-    "LOCAL_ASR_BEAM_SIZE",
-    "LOCAL_ASR_VAD_FILTER",
-    "LOCAL_ASR_OUTPUT_TIMESTAMPS",
+    "ASR_API_URL",
+    "ASR_API_TIMEOUT_SECONDS",
     "LOCAL_ASR_TEMP_DIR",
     "LOCAL_ASR_MAX_AUDIO_MINUTES",
     "LOCAL_ASR_CLEANUP_TEMP_FILES",
@@ -48,14 +43,9 @@ class TestLocalAsrConfig(unittest.TestCase):
             config.LOCAL_ASR_CONFIG,
             {
                 "enabled": False,
-                "provider": "faster_whisper",
-                "model": "large-v3",
-                "device": "cpu",
-                "compute_type": "int8",
-                "language": "zh",
-                "beam_size": 5,
-                "vad_filter": True,
-                "output_timestamps": True,
+                "provider": "sensevoice_api",
+                "api_url": "http://127.0.0.1:8900/v1/transcribe",
+                "api_timeout_seconds": 300,
                 "temp_dir": "./data/temp_asr",
                 "max_audio_minutes": 90,
                 "cleanup_temp_files": True,
@@ -67,13 +57,8 @@ class TestLocalAsrConfig(unittest.TestCase):
             {
                 "LOCAL_ASR_ENABLED": "false",
                 "LOCAL_ASR_PROVIDER": "custom_asr",
-                "LOCAL_ASR_MODEL": "small",
-                "LOCAL_ASR_DEVICE": "cpu",
-                "LOCAL_ASR_COMPUTE_TYPE": "int8",
-                "LOCAL_ASR_LANGUAGE": "en",
-                "LOCAL_ASR_BEAM_SIZE": "2",
-                "LOCAL_ASR_VAD_FILTER": "0",
-                "LOCAL_ASR_OUTPUT_TIMESTAMPS": "no",
+                "ASR_API_URL": "http://asr.internal/v1/transcribe",
+                "ASR_API_TIMEOUT_SECONDS": "45",
                 "LOCAL_ASR_TEMP_DIR": "/tmp/asr",
                 "LOCAL_ASR_MAX_AUDIO_MINUTES": "45",
                 "LOCAL_ASR_CLEANUP_TEMP_FILES": "False",
@@ -87,13 +72,8 @@ class TestLocalAsrConfig(unittest.TestCase):
             {
                 "enabled": False,
                 "provider": "custom_asr",
-                "model": "small",
-                "device": "cpu",
-                "compute_type": "int8",
-                "language": "en",
-                "beam_size": 2,
-                "vad_filter": False,
-                "output_timestamps": False,
+                "api_url": "http://asr.internal/v1/transcribe",
+                "api_timeout_seconds": 45,
                 "temp_dir": "/tmp/asr",
                 "max_audio_minutes": 45,
                 "cleanup_temp_files": False,
@@ -104,23 +84,25 @@ class TestLocalAsrConfig(unittest.TestCase):
         os.environ.update(
             {
                 "LOCAL_ASR_PROVIDER": "",
-                "LOCAL_ASR_MODEL": "",
+                "ASR_API_URL": "",
                 "LOCAL_ASR_TEMP_DIR": "",
             }
         )
 
         config = _reload_config_module()
 
-        self.assertEqual(config.LOCAL_ASR_CONFIG["provider"], "faster_whisper")
-        self.assertEqual(config.LOCAL_ASR_CONFIG["model"], "large-v3")
+        self.assertEqual(config.LOCAL_ASR_CONFIG["provider"], "sensevoice_api")
+        self.assertEqual(
+            config.LOCAL_ASR_CONFIG["api_url"],
+            "http://127.0.0.1:8900/v1/transcribe",
+        )
         self.assertEqual(config.LOCAL_ASR_CONFIG["temp_dir"], "./data/temp_asr")
 
     def test_empty_string_bool_and_int_envs_fall_back_to_defaults(self):
         os.environ.update(
             {
                 "LOCAL_ASR_ENABLED": "",
-                "LOCAL_ASR_BEAM_SIZE": "",
-                "LOCAL_ASR_VAD_FILTER": "",
+                "ASR_API_TIMEOUT_SECONDS": "",
                 "LOCAL_ASR_MAX_AUDIO_MINUTES": "",
             }
         )
@@ -128,8 +110,7 @@ class TestLocalAsrConfig(unittest.TestCase):
         config = _reload_config_module()
 
         self.assertIs(config.LOCAL_ASR_CONFIG["enabled"], False)
-        self.assertEqual(config.LOCAL_ASR_CONFIG["beam_size"], 5)
-        self.assertIs(config.LOCAL_ASR_CONFIG["vad_filter"], True)
+        self.assertEqual(config.LOCAL_ASR_CONFIG["api_timeout_seconds"], 300)
         self.assertEqual(config.LOCAL_ASR_CONFIG["max_audio_minutes"], 90)
 
     def test_invalid_non_empty_boolean_env_raises_value_error(self):
@@ -141,13 +122,8 @@ class TestLocalAsrConfig(unittest.TestCase):
     def test_audio_transcription_service_rejects_unsupported_provider(self):
         config = {
             "provider": "unsupported_provider",
-            "model": "large-v3",
-            "device": "cpu",
-            "compute_type": "int8",
-            "language": "zh",
-            "beam_size": 5,
-            "vad_filter": True,
-            "output_timestamps": True,
+            "api_url": "http://127.0.0.1:8900/v1/transcribe",
+            "api_timeout_seconds": 300,
             "temp_dir": "./data/temp_asr",
             "max_audio_minutes": 90,
             "cleanup_temp_files": True,
@@ -160,16 +136,11 @@ class TestLocalAsrConfig(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "LOCAL_ASR_PROVIDER"):
                 AudioTranscriptionService(fetcher=mock.Mock())
 
-    def test_audio_transcription_service_passes_output_timestamps_to_transcriber(self):
+    def test_audio_transcription_service_uses_sensevoice_client(self):
         config = {
-            "provider": "faster_whisper",
-            "model": "large-v3",
-            "device": "cpu",
-            "compute_type": "int8",
-            "language": "zh",
-            "beam_size": 5,
-            "vad_filter": True,
-            "output_timestamps": False,
+            "provider": "sensevoice_api",
+            "api_url": "http://127.0.0.1:8900/v1/transcribe",
+            "api_timeout_seconds": 123,
             "temp_dir": "./data/temp_asr",
             "max_audio_minutes": 90,
             "cleanup_temp_files": True,
@@ -180,17 +151,12 @@ class TestLocalAsrConfig(unittest.TestCase):
             config,
         ):
             with mock.patch(
-                "services.ai_summary.audio_transcription_service.WhisperTranscriber"
-            ) as whisper_transcriber:
+                "services.ai_summary.audio_transcription_service.SenseVoiceClient"
+            ) as sensevoice_client:
                 service = AudioTranscriptionService(fetcher=mock.Mock())
 
-        whisper_transcriber.assert_called_once_with(
-            model_name="large-v3",
-            device="cpu",
-            compute_type="int8",
-            language="zh",
-            beam_size=5,
-            vad_filter=True,
-            output_timestamps=False,
+        sensevoice_client.assert_called_once_with(
+            api_url="http://127.0.0.1:8900/v1/transcribe",
+            timeout_seconds=123,
         )
-        self.assertIs(service.transcriber, whisper_transcriber.return_value)
+        self.assertIs(service.transcriber, sensevoice_client.return_value)

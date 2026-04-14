@@ -321,6 +321,12 @@ class MonitorService:
                 self.logger.info("凭证即将过期，开始刷新...")
                 await self.credential.refresh()
                 self.logger.info("凭证刷新成功")
+                refreshed_values = self._extract_credential_values(self.credential)
+                if refreshed_values.get("SESSDATA"):
+                    self.auth.set_credential_values(refreshed_values)
+                    self.logger.info("刷新后的凭证已持久化到 bilibili_auth.json")
+                else:
+                    self.logger.warning("凭证刷新后缺少 SESSDATA，跳过持久化")
 
             self._last_credential_refresh = current_time
             return True
@@ -330,6 +336,21 @@ class MonitorService:
             await self._notify_qr_login_needed("凭证刷新失败")
             # 不发送通知，等获取动态失败时自然会知道
             return False
+
+    @staticmethod
+    def _extract_credential_values(credential: Any) -> Dict[str, Any]:
+        if not credential:
+            return {}
+
+        return {
+            "SESSDATA": getattr(credential, "sessdata", None),
+            "bili_jct": getattr(credential, "bili_jct", None),
+            "buvid3": getattr(credential, "buvid3", None),
+            "buvid4": getattr(credential, "buvid4", None),
+            "DedeUserID": getattr(credential, "dedeuserid", None),
+            "DedeUserID__ckMd5": getattr(credential, "dedeuserid_ckmd5", None),
+            "ac_time_value": getattr(credential, "ac_time_value", None),
+        }
 
     def _refresh_runtime_credential(self) -> None:
         """从 bilibili_auth.json 重新加载凭证并应用到运行时"""

@@ -60,7 +60,7 @@ cp bilibili_creators.json.example bilibili_creators.json
 
 **注意**：此文件包含敏感信息，已在.gitignore 中忽略，不会被推送到 GitHub。
 
-详细配置请参考：[../docs/BILIBILI_SETUP.md](../docs/BILIBILI_SETUP.md)
+详细配置请参考：[../docs/Configuration.md](../docs/Configuration.md)
 
 ## 安全提示
 

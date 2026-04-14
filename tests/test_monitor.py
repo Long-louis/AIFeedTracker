@@ -310,6 +310,7 @@ class _FakeAuth:
         self.active_qr = False
         self.start_count = 0
         self.poll_result = ("none", None)
+        self.credential_updates = []
 
     def get_qr_last_notify_ts(self):
         return self.last_notify_ts
@@ -338,7 +339,32 @@ class _FakeAuth:
         self.pending_reason = None
 
     def set_credential_values(self, values):
-        return None
+        self.credential_updates.append(values)
+
+
+class _FakeCredentialNeedRefresh:
+    def __init__(self):
+        self.sessdata = "old_sess"
+        self.bili_jct = "old_jct"
+        self.buvid3 = "old_buvid3"
+        self.buvid4 = "old_buvid4"
+        self.dedeuserid = "10001"
+        self.dedeuserid_ckmd5 = "old_ckmd5"
+        self.ac_time_value = "old_ac"
+        self.refreshed = False
+
+    async def check_refresh(self):
+        return True
+
+    async def refresh(self):
+        self.refreshed = True
+        self.sessdata = "new_sess"
+        self.bili_jct = "new_jct"
+        self.buvid3 = "new_buvid3"
+        self.buvid4 = "new_buvid4"
+        self.dedeuserid = "20002"
+        self.dedeuserid_ckmd5 = "new_ckmd5"
+        self.ac_time_value = "new_ac"
 
 
 class TestMonitorQrNotification(unittest.IsolatedAsyncioTestCase):
@@ -380,6 +406,19 @@ class TestMonitorQrNotification(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(monitor.auth.start_count, 1)
         self.assertEqual(len(monitor.feishu_bot.notifications), 1)
         self.assertIsNone(monitor.auth.get_qr_pending_notify_reason())
+
+    async def test_check_and_refresh_credential_persists_refreshed_values(self):
+        monitor = self._build_monitor(hour=10)
+        monitor._last_credential_refresh = 0
+        monitor.credential = _FakeCredentialNeedRefresh()
+
+        ok = await monitor._check_and_refresh_credential()
+
+        self.assertTrue(ok)
+        self.assertTrue(monitor.credential.refreshed)
+        self.assertEqual(len(monitor.auth.credential_updates), 1)
+        self.assertEqual(monitor.auth.credential_updates[0]["SESSDATA"], "new_sess")
+        self.assertEqual(monitor.auth.credential_updates[0]["bili_jct"], "new_jct")
 
 
 class TestMonitorDynamicSendPath(unittest.IsolatedAsyncioTestCase):

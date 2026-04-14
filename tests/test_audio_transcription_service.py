@@ -180,6 +180,33 @@ class TestAudioTranscriptionService(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(service.last_error_type)
         self.assertEqual(fetcher.cleanup_calls, ["/tmp/asr-workspace"])
 
+    async def test_transcribe_video_ignores_missing_cleanup_flag_on_fetcher(self):
+        audio_result = AudioSourceResult(
+            video_id="BV1xx411c7mD",
+            audio_path="/tmp/audio.wav",
+            workspace="/tmp/asr-workspace",
+            duration_seconds=123.0,
+        )
+        fetcher = FakeFetcher(result=audio_result, cleanup_temp_files=True)
+        delattr(fetcher, "cleanup_temp_files")
+        transcriber = FakeTranscriber(result="[00:00] 测试转写")
+        service = AudioTranscriptionService(fetcher=fetcher, transcriber=transcriber)
+
+        result = await service.transcribe_video(
+            "https://www.bilibili.com/video/BV1xx411c7mD"
+        )
+
+        self.assertEqual(
+            result,
+            {
+                "text": "[00:00] 测试转写",
+                "text_source": "local_asr",
+                "video_id": "BV1xx411c7mD",
+                "duration_seconds": 123.0,
+            },
+        )
+        self.assertEqual(fetcher.cleanup_calls, [])
+
     def test_package_exports_local_asr_types(self):
         self.assertEqual(AudioFetchErrorType.__name__, "AudioFetchErrorType")
         self.assertEqual(ASRErrorType.__name__, "ASRErrorType")

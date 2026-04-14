@@ -130,6 +130,18 @@ class TestFeishuDocsAuthPayload(unittest.TestCase):
 
 
 class TestFeishuDocsBlockConversion(unittest.TestCase):
+    def test_extract_converted_blocks_from_children(self):
+        blocks = FeishuDocsService._extract_converted_blocks(
+            {
+                "children": [
+                    {"block_type": 3, "heading1": {"elements": []}},
+                    "invalid",
+                ]
+            }
+        )
+        self.assertEqual(len(blocks), 1)
+        self.assertEqual(blocks[0]["block_type"], 3)
+
     def test_markdown_to_text_blocks_keeps_non_empty_lines(self):
         blocks = FeishuDocsService._markdown_to_text_blocks(
             "## 关键信息和观点\n- 要点A\n\n## 时间线总结\n- 00:00 开场"
@@ -147,6 +159,54 @@ class TestFeishuDocsBlockConversion(unittest.TestCase):
             blocks[0]["text"]["elements"][0]["text_run"]["content"],
             "（暂无总结内容）",
         )
+
+
+class TestFeishuDocsMarkdownConvert(unittest.IsolatedAsyncioTestCase):
+    async def test_convert_markdown_to_blocks_prefers_convert_api(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = f"{tmpdir}/feishu_doc_state.json"
+            service = _FakeFeishuDocsService(state_path)
+
+            async def _fake_request_json(method, path, **kwargs):
+                if path == "/docx/v1/documents/blocks/convert":
+                    return {
+                        "children": [
+                            {
+                                "block_type": 3,
+                                "heading1": {
+                                    "elements": [{"text_run": {"content": "标题"}}]
+                                },
+                            }
+                        ]
+                    }
+                raise AssertionError(f"unexpected path: {path}")
+
+            service._request_json = _fake_request_json  # type: ignore[method-assign]
+
+            blocks = await service._convert_markdown_to_blocks("token", "# 标题")
+            self.assertEqual(len(blocks), 1)
+            self.assertEqual(blocks[0]["block_type"], 3)
+
+    async def test_convert_markdown_to_blocks_falls_back_when_scope_missing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = f"{tmpdir}/feishu_doc_state.json"
+            service = _FakeFeishuDocsService(state_path)
+
+            async def _fake_request_json(method, path, **kwargs):
+                raise RuntimeError(
+                    "Access denied: requires docx:document.block:convert"
+                )
+
+            service._request_json = _fake_request_json  # type: ignore[method-assign]
+
+            blocks = await service._convert_markdown_to_blocks(
+                "token", "## 关键信息和观点\n- 要点A"
+            )
+            self.assertEqual(len(blocks), 2)
+            self.assertEqual(
+                blocks[0]["text"]["elements"][0]["text_run"]["content"],
+                "## 关键信息和观点",
+            )
 
 
 if __name__ == "__main__":

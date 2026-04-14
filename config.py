@@ -26,7 +26,7 @@ if env_file.exists():
     load_dotenv(env_file)
 
 # ============================================
-# Feishu 配置（Webhook-only，使用 channels registry）
+# Feishu 配置（通过 channels registry 路由 webhook/app 通道）
 # ============================================
 
 # 模板卡片配置
@@ -95,14 +95,9 @@ def _get_env_int(name: str, default: int) -> int:
 def load_local_asr_config() -> dict:
     return {
         "enabled": _get_env_bool("LOCAL_ASR_ENABLED", False),
-        "provider": _get_env_str("LOCAL_ASR_PROVIDER", "faster_whisper"),
-        "model": _get_env_str("LOCAL_ASR_MODEL", "large-v3"),
-        "device": _get_env_str("LOCAL_ASR_DEVICE", "cpu"),
-        "compute_type": _get_env_str("LOCAL_ASR_COMPUTE_TYPE", "int8"),
-        "language": _get_env_str("LOCAL_ASR_LANGUAGE", "zh"),
-        "beam_size": _get_env_int("LOCAL_ASR_BEAM_SIZE", 5),
-        "vad_filter": _get_env_bool("LOCAL_ASR_VAD_FILTER", True),
-        "output_timestamps": _get_env_bool("LOCAL_ASR_OUTPUT_TIMESTAMPS", True),
+        "provider": _get_env_str("LOCAL_ASR_PROVIDER", "sensevoice_api"),
+        "api_url": _get_env_str("ASR_API_URL", "http://127.0.0.1:8900/v1/transcribe"),
+        "api_timeout_seconds": _get_env_int("ASR_API_TIMEOUT_SECONDS", 300),
         "temp_dir": _get_env_str("LOCAL_ASR_TEMP_DIR", "./data/temp_asr"),
         "max_audio_minutes": _get_env_int("LOCAL_ASR_MAX_AUDIO_MINUTES", 90),
         "cleanup_temp_files": _get_env_bool("LOCAL_ASR_CLEANUP_TEMP_FILES", True),

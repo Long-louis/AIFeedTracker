@@ -110,6 +110,7 @@ def load_feishu_docs_config() -> dict:
         "app_id": _get_env_str("FEISHU_DOCS_APP_ID", FEISHU_APP_ID),
         "app_secret": _get_env_str("FEISHU_DOCS_APP_SECRET", FEISHU_APP_SECRET),
         "wiki_space_id": _get_env_str("FEISHU_DOCS_WIKI_SPACE_ID", ""),
+        "tenant_host": _get_env_str("FEISHU_DOCS_TENANT_HOST", ""),
         "root_node_token": _get_env_str("FEISHU_DOCS_ROOT_NODE_TOKEN", ""),
         "root_title": _get_env_str("FEISHU_DOCS_ROOT_TITLE", "AI视频知识库"),
         "state_path": _get_env_str(

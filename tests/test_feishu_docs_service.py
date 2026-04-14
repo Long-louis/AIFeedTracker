@@ -268,5 +268,47 @@ class TestFeishuDocsReplaceContent(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(batch_sizes, [50, 50, 20])
 
 
+class TestFeishuDocsShareableUrl(unittest.IsolatedAsyncioTestCase):
+    async def test_to_shareable_url_converts_docx_to_tenant_wiki_link(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = f"{tmpdir}/feishu_doc_state.json"
+            service = FeishuDocsService(
+                {
+                    "enabled": True,
+                    "app_id": "app-id",
+                    "app_secret": "app-secret",
+                    "wiki_space_id": "space-token",
+                    "root_node_token": "",
+                    "root_title": "AI视频知识库",
+                    "state_path": state_path,
+                    "request_timeout_seconds": 5,
+                    "tenant_host": "tenant.feishu.cn",
+                }
+            )
+
+            async def _fake_get_token():
+                return "token"
+
+            async def _fake_request_json(method, path, **kwargs):
+                self.assertEqual(method, "GET")
+                self.assertIn(
+                    "/wiki/v2/spaces/get_node?token=doc-token-1&obj_type=docx", path
+                )
+                return {
+                    "node": {
+                        "node_token": "wiki-node-1",
+                        "obj_token": "doc-token-1",
+                    }
+                }
+
+            service._get_tenant_access_token = _fake_get_token  # type: ignore[method-assign]
+            service._request_json = _fake_request_json  # type: ignore[method-assign]
+
+            shareable = await service.to_shareable_url(
+                "https://feishu.cn/docx/doc-token-1"
+            )
+            self.assertEqual(shareable, "https://tenant.feishu.cn/wiki/wiki-node-1")
+
+
 if __name__ == "__main__":
     unittest.main()

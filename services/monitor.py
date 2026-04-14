@@ -1799,8 +1799,18 @@ class MonitorService:
                 addition_subtitle=rendered["addition_subtitle"],
             )
             if knowledge_doc_url and hasattr(self.feishu_bot, "send_text"):
+                preview_url = knowledge_doc_url
+                if getattr(self, "feishu_docs_service", None) and hasattr(
+                    self.feishu_docs_service, "to_shareable_url"
+                ):
+                    try:
+                        preview_url = await self.feishu_docs_service.to_shareable_url(
+                            knowledge_doc_url
+                        )
+                    except Exception as e:
+                        self.logger.warning("解析知识库预览链接失败: %s", str(e))
                 await self.feishu_bot.send_text(
-                    knowledge_doc_url,
+                    preview_url,
                     channel=creator.feishu_channel,
                 )
 

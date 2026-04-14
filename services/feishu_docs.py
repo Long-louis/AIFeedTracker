@@ -10,6 +10,7 @@ import re
 import time
 from json import JSONDecodeError
 from datetime import datetime
+from urllib.parse import quote
 from typing import Any, Dict, List, Optional
 
 import aiohttp
@@ -41,6 +42,7 @@ class FeishuDocsService:
         self.request_timeout_seconds = int(
             self.config.get("request_timeout_seconds") or 30
         )
+        self.tenant_host = str(self.config.get("tenant_host") or "").strip()
 
         self._tenant_access_token: Optional[str] = None
         self._tenant_access_token_expire_ts = 0.0
@@ -105,6 +107,54 @@ class FeishuDocsService:
     @staticmethod
     def _hash_summary(summary_markdown: str) -> str:
         return hashlib.sha256(summary_markdown.encode("utf-8")).hexdigest()
+
+    def _wiki_host(self) -> str:
+        host = self.tenant_host or "feishu.cn"
+        if host.startswith("https://"):
+            host = host[len("https://") :]
+        elif host.startswith("http://"):
+            host = host[len("http://") :]
+        return host.rstrip("/") or "feishu.cn"
+
+    @staticmethod
+    def _extract_doc_token_from_url(url: str) -> str:
+        if not url:
+            return ""
+        matched = re.search(r"/docx/([^/?#]+)", url)
+        return matched.group(1) if matched else ""
+
+    async def _resolve_wiki_node_token_by_doc_token(
+        self, token: str, doc_token: str
+    ) -> str:
+        if not doc_token:
+            return ""
+        encoded_doc_token = quote(doc_token, safe="")
+        data = await self._request_json(
+            "GET",
+            f"/wiki/v2/spaces/get_node?token={encoded_doc_token}&obj_type=docx",
+            token=token,
+        )
+        node = data.get("node") if isinstance(data.get("node"), dict) else data
+        return str(node.get("node_token") or "")
+
+    async def to_shareable_url(self, url: str) -> str:
+        doc_token = self._extract_doc_token_from_url(url)
+        if not doc_token or not self.enabled:
+            return url
+
+        try:
+            token = await self._get_tenant_access_token()
+            node_token = await self._resolve_wiki_node_token_by_doc_token(
+                token,
+                doc_token,
+            )
+        except Exception as exc:
+            self.logger.warning("解析知识库预览链接失败，保留原始链接: %s", exc)
+            return url
+
+        if not node_token:
+            return url
+        return f"https://{self._wiki_host()}/wiki/{node_token}"
 
     async def _request_json(
         self,

@@ -10,9 +10,13 @@ dependencies = [
     "apscheduler>=3.11.0",
     "bilibili-api-python>=17.4.0",
     "brotli>=1.1.0",
+    "fastapi>=0.136.1",
+    "httpx>=0.28.1",
     "lark-oapi>=1.4.23",
     "openai>=2.3.0",
     "playwright>=1.55.0",
     "python-dotenv>=1.1.1",
+    "python-multipart>=0.0.27",
     "tiktoken>=0.7.0",
+    "uvicorn[standard]>=0.46.0",
 ]

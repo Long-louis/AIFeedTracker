@@ -114,7 +114,36 @@ ASR 服务容器路径：`asr_service/deploy/docker-compose.yml`
 - 写入成功时，会在消息 `AI 总结` 末尾追加知识库链接。
 - 开通 `docx:document.block:convert` 可将 Markdown 转为带样式文档块；未开通会回退为纯文本块。
 
-## 7) 运行与排查
+## 7) 创作者管理 Web 服务（可选）
+
+用途：提供一个受密码保护的管理界面，用于维护 `data/bilibili_creators.json`。
+
+它和主监控服务的关系：该页面修改创作者配置文件后，主服务会基于现有的热重载机制感知变化并应用，无需重启主进程。
+
+环境变量：
+
+- `CREATOR_ADMIN_PASSWORD`
+- `CREATOR_ADMIN_SECRET_KEY`
+- `CREATOR_ADMIN_HOST`
+- `CREATOR_ADMIN_PORT`
+- `CREATOR_ADMIN_CREATORS_FILE`
+
+启动示例：
+
+```bash
+uv run python main.py --mode creator-admin
+```
+
+安全与部署建议：
+
+- 默认建议仅本地监听（例如 `127.0.0.1`），不要直接暴露到公网。
+- 对外访问请放在反向代理后，并配置 TLS 与访问控制。
+
+并发写入说明：
+
+- `data/bilibili_creators.json` 采用单写者模型，任一时刻只应有一个写入端（该管理服务或人工编辑）。
+
+## 8) 运行与排查
 
 单次验证：
 
@@ -130,7 +159,7 @@ uv run python main.py --mode service
 
 若出现登录失效，服务会尝试刷新凭证，必要时触发二维码登录。
 
-## 8) 升级配置刷新
+## 9) 升级配置刷新
 
 当 `env.example` 或 `data/*.json.example` 结构变化时，请手动同步本地：
 
@@ -138,7 +167,7 @@ uv run python main.py --mode service
 - `data/feishu_channels.json`
 - `data/bilibili_creators.json`
 
-## 9) 架构模式速览（便于二次开发）
+## 10) 架构模式速览（便于二次开发）
 
 - 编排层与能力层分离：`main.py:203`、`services/monitor.py:212`
 - 配置集中构建并在 import 时加载：`config.py:22`

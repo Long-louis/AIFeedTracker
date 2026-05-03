@@ -27,6 +27,7 @@ class _FakeState:
 class _FakeFeishuBot:
     def __init__(self):
         self.cards = []
+        self.texts = []
 
     async def send_card_message(
         self,
@@ -47,6 +48,10 @@ class _FakeFeishuBot:
                 "addition_subtitle": addition_subtitle,
             }
         )
+        return True
+
+    async def send_text(self, text, channel=None):
+        self.texts.append({"text": text, "channel": channel})
         return True
 
 
@@ -73,7 +78,7 @@ class _FakeDocsService:
 
     async def upsert_video_summary(self, **kwargs):
         self.calls.append(kwargs)
-        return "https://feishu.cn/docx/simulated-kb-doc"
+        return "https://tenant.feishu.cn/wiki/simulated-kb-doc"
 
 
 class TestVideoKnowledgeBaseSimulatedE2E(unittest.IsolatedAsyncioTestCase):
@@ -163,11 +168,13 @@ class TestVideoKnowledgeBaseSimulatedE2E(unittest.IsolatedAsyncioTestCase):
         sent_card = monitor.feishu_bot.cards[0]
         self.assertEqual(sent_card["addition_title"], "发布新视频")
         self.assertIn("**AI 总结**", sent_card["markdown_content"])
-        self.assertIn("## 关键信息和观点", sent_card["markdown_content"])
-        self.assertIn("## 时间线总结", sent_card["markdown_content"])
-        self.assertIn(
-            "[知识库文档](https://feishu.cn/docx/simulated-kb-doc)",
-            sent_card["markdown_content"],
+        self.assertIn("已写入飞书知识库", sent_card["markdown_content"])
+        self.assertNotIn("## 关键信息和观点", sent_card["markdown_content"])
+        self.assertNotIn("## 时间线总结", sent_card["markdown_content"])
+        self.assertEqual(len(monitor.feishu_bot.texts), 1)
+        self.assertEqual(
+            monitor.feishu_bot.texts[0]["text"],
+            "https://tenant.feishu.cn/wiki/simulated-kb-doc",
         )
 
         self.assertEqual(

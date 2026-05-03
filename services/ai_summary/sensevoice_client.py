@@ -26,7 +26,6 @@ class SenseVoiceClient:
         self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
         self.api_url = api_url
         self.timeout_seconds = timeout_seconds
-        self.max_attempts = 3
         self.last_error: Optional[str] = None
         self.last_error_type = ASRErrorType.NONE
 
@@ -34,26 +33,20 @@ class SenseVoiceClient:
         self.last_error = None
         self.last_error_type = ASRErrorType.NONE
 
-        for attempt in range(1, self.max_attempts + 1):
-            try:
-                payload = await self._post_audio(audio_path)
-                break
-            except asyncio.TimeoutError:
-                self.last_error_type = ASRErrorType.ASR_API_TIMEOUT
-                self.last_error = "ASR API 请求超时"
-                if attempt >= self.max_attempts:
-                    return None
-            except LocalAudioFileOpenError as exc:
-                self.last_error_type = ASRErrorType.ASR_API_REQUEST_FAILED
-                self.last_error = str(exc)
-                return None
-            except Exception as exc:
-                self.last_error_type = ASRErrorType.ASR_API_REQUEST_FAILED
-                self.last_error = f"ASR API 调用失败: {exc}"
-                if not self._is_retryable_exception(exc) or attempt >= self.max_attempts:
-                    return None
-
-            await asyncio.sleep(attempt)
+        try:
+            payload = await self._post_audio(audio_path)
+        except asyncio.TimeoutError:
+            self.last_error_type = ASRErrorType.ASR_API_TIMEOUT
+            self.last_error = "ASR API 请求超时"
+            return None
+        except LocalAudioFileOpenError as exc:
+            self.last_error_type = ASRErrorType.ASR_API_REQUEST_FAILED
+            self.last_error = str(exc)
+            return None
+        except Exception as exc:
+            self.last_error_type = ASRErrorType.ASR_API_REQUEST_FAILED
+            self.last_error = f"ASR API 调用失败: {exc}"
+            return None
 
         text = str(payload.get("text") or "").strip()
         if not text:
@@ -61,8 +54,6 @@ class SenseVoiceClient:
             self.last_error = "ASR API 输出为空"
             return None
 
-        self.last_error = None
-        self.last_error_type = ASRErrorType.NONE
         return text
 
     async def _post_audio(self, audio_path: str) -> dict:
@@ -86,10 +77,3 @@ class SenseVoiceClient:
                 async with session.post(self.api_url, data=form) as response:
                     response.raise_for_status()
                     return await response.json()
-
-    def _is_retryable_exception(self, exc: Exception) -> bool:
-        if isinstance(exc, aiohttp.ClientResponseError):
-            return exc.status in {500, 502, 503, 504, 429}
-        if isinstance(exc, aiohttp.ClientError):
-            return True
-        return False

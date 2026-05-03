@@ -329,19 +329,6 @@ async def main():
             await bot.cleanup()
 
 
-def run() -> None:
-    """同步入口，避免 creator-admin 的 uvicorn 嵌套 asyncio.run。"""
-    if "--mode" in sys.argv:
-        mode_index = sys.argv.index("--mode")
-        if len(sys.argv) > mode_index + 1 and sys.argv[mode_index + 1] == "creator-admin":
-            from creator_admin.__main__ import main as creator_admin_main
-
-            creator_admin_main()
-            return
-
-    asyncio.run(main())
-
-
 if __name__ == "__main__":
     print("AI视频机器人启动中...")
-    run()
+    asyncio.run(main())

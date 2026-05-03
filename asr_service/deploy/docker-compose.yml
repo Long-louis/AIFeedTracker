@@ -1,0 +1,34 @@
+services:
+  sensevoice-asr:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: sensevoice-asr
+    restart: unless-stopped
+    ports:
+      - "8900:8900"
+    environment:
+      - ASR_MODEL=iic/SenseVoiceSmall
+      - ASR_DEVICE=cuda
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    volumes:
+      - ../cache/modelscope:/home/app/.cache/modelscope
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8900/health', timeout=3).read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
+    # Legacy docker-compose compatibility.
+    runtime: nvidia
+
+    # Docker Compose plugin (v2+) GPU reservation.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

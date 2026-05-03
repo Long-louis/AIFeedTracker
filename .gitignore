@@ -26,6 +26,8 @@ browser_data/
 .cursor/
 .worktrees/
 docs/superpowers/
+opencode.jsonc
+.opencode/
 
 # Server-local deploy files
 deploy/.env
@@ -51,7 +53,6 @@ log/
 data/bilibili_state.json
 data/feishu_doc_state.json
 data/models/
-data/temp_asr*/
 data/*.bak
 data/*.tmp
 # 本地私有配置文件
@@ -78,3 +79,11 @@ backup/
 *.bak
 *.backup
 data/bilibili_auth.json
+
+# Local large test fixtures and temp workspaces
+tests/fixtures/
+tmp/
+
+# Standalone ASR service local runtime data
+asr_service/cache/
+asr_service/data/

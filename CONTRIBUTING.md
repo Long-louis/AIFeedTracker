@@ -102,5 +102,4 @@ Feel free to open an issue for any questions or discussion!
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under the MIT License.
-
+By contributing, you agree that your contributions will be licensed under CC BY-NC-SA 4.0.

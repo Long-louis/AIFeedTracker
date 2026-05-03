@@ -92,13 +92,6 @@ def _get_env_int(name: str, default: int) -> int:
     return int(value)
 
 
-def _get_env_float(name: str, default: float) -> float:
-    value = os.getenv(name)
-    if value is None or value == "":
-        return default
-    return float(value)
-
-
 def load_local_asr_config() -> dict:
     return {
         "enabled": _get_env_bool("LOCAL_ASR_ENABLED", False),
@@ -136,11 +129,6 @@ AI_CONFIG = {
     "api_key": os.getenv("AI_API_KEY"),
     "base_url": os.getenv("AI_BASE_URL"),  # 可选，不设置则根据service自动选择
     "model": os.getenv("AI_MODEL"),  # 可选，不设置则根据service自动选择
-    "api_timeout_seconds": _get_env_int("AI_API_TIMEOUT_SECONDS", 120),
-    "api_connect_timeout_seconds": _get_env_int("AI_API_CONNECT_TIMEOUT_SECONDS", 20),
-    "api_max_retries": _get_env_int("AI_API_MAX_RETRIES", 2),
-    "api_retry_attempts": _get_env_int("AI_API_RETRY_ATTEMPTS", 2),
-    "api_retry_backoff_seconds": _get_env_float("AI_API_RETRY_BACKOFF_SECONDS", 2.0),
     # 适配长视频总结：按模型上下文窗口做 token 预算（DeepSeek 文档：128K）
     "context_window_tokens": int(os.getenv("AI_CONTEXT_WINDOW_TOKENS", "128000")),
     # DeepSeek-chat 默认 max output 4K（可在 .env 覆盖；若你开到 8K 也可写 8000）

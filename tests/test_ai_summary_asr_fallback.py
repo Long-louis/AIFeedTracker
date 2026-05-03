@@ -108,7 +108,7 @@ class TestAISummaryASRFallback(unittest.IsolatedAsyncioTestCase):
         service.audio_transcription_service.transcribe_video = AsyncMock(
             return_value=None
         )
-        service.audio_transcription_service.last_error = "whisper 模型加载失败"
+        service.audio_transcription_service.last_error = "ASR API 请求超时"
         video_url = "https://www.bilibili.com/video/BV1xx411c7mD"
 
         (
@@ -121,7 +121,7 @@ class TestAISummaryASRFallback(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(success)
         self.assertEqual(message, "所有视频总结都失败")
         self.assertEqual(summary_links, [])
-        self.assertEqual(summary_contents, ["❌ 本地转写失败: whisper 模型加载失败"])
+        self.assertEqual(summary_contents, ["❌ 本地转写失败: ASR API 请求超时"])
         service.audio_transcription_service.transcribe_video.assert_awaited_once_with(
             video_url
         )

@@ -15,8 +15,8 @@ sys.path.insert(0, str(project_root))
 
 from config import get_config_status
 
-# 导入核心模块
-from core import configure_logging
+# 导入基础配置
+from logging_config import configure_logging
 from services import FeishuBot, MonitorService
 from services.feishu_docs import FeishuDocsService
 

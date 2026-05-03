@@ -26,7 +26,7 @@ if env_file.exists():
     load_dotenv(env_file)
 
 # ============================================
-# Feishu 配置（Webhook-only，使用 channels registry）
+# Feishu 配置（通过 channels registry 路由 webhook/app 通道）
 # ============================================
 
 # 模板卡片配置
@@ -92,17 +92,19 @@ def _get_env_int(name: str, default: int) -> int:
     return int(value)
 
 
+def _get_env_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None or value == "":
+        return default
+    return float(value)
+
+
 def load_local_asr_config() -> dict:
     return {
         "enabled": _get_env_bool("LOCAL_ASR_ENABLED", False),
-        "provider": _get_env_str("LOCAL_ASR_PROVIDER", "faster_whisper"),
-        "model": _get_env_str("LOCAL_ASR_MODEL", "large-v3"),
-        "device": _get_env_str("LOCAL_ASR_DEVICE", "cpu"),
-        "compute_type": _get_env_str("LOCAL_ASR_COMPUTE_TYPE", "int8"),
-        "language": _get_env_str("LOCAL_ASR_LANGUAGE", "zh"),
-        "beam_size": _get_env_int("LOCAL_ASR_BEAM_SIZE", 5),
-        "vad_filter": _get_env_bool("LOCAL_ASR_VAD_FILTER", True),
-        "output_timestamps": _get_env_bool("LOCAL_ASR_OUTPUT_TIMESTAMPS", True),
+        "provider": _get_env_str("LOCAL_ASR_PROVIDER", "sensevoice_api"),
+        "api_url": _get_env_str("ASR_API_URL", "http://127.0.0.1:8900/v1/transcribe"),
+        "api_timeout_seconds": _get_env_int("ASR_API_TIMEOUT_SECONDS", 300),
         "temp_dir": _get_env_str("LOCAL_ASR_TEMP_DIR", "./data/temp_asr"),
         "max_audio_minutes": _get_env_int("LOCAL_ASR_MAX_AUDIO_MINUTES", 90),
         "cleanup_temp_files": _get_env_bool("LOCAL_ASR_CLEANUP_TEMP_FILES", True),
@@ -115,6 +117,7 @@ def load_feishu_docs_config() -> dict:
         "app_id": _get_env_str("FEISHU_DOCS_APP_ID", FEISHU_APP_ID),
         "app_secret": _get_env_str("FEISHU_DOCS_APP_SECRET", FEISHU_APP_SECRET),
         "wiki_space_id": _get_env_str("FEISHU_DOCS_WIKI_SPACE_ID", ""),
+        "tenant_host": _get_env_str("FEISHU_DOCS_TENANT_HOST", ""),
         "root_node_token": _get_env_str("FEISHU_DOCS_ROOT_NODE_TOKEN", ""),
         "root_title": _get_env_str("FEISHU_DOCS_ROOT_TITLE", "AI视频知识库"),
         "state_path": _get_env_str(
@@ -133,6 +136,11 @@ AI_CONFIG = {
     "api_key": os.getenv("AI_API_KEY"),
     "base_url": os.getenv("AI_BASE_URL"),  # 可选，不设置则根据service自动选择
     "model": os.getenv("AI_MODEL"),  # 可选，不设置则根据service自动选择
+    "api_timeout_seconds": _get_env_int("AI_API_TIMEOUT_SECONDS", 120),
+    "api_connect_timeout_seconds": _get_env_int("AI_API_CONNECT_TIMEOUT_SECONDS", 20),
+    "api_max_retries": _get_env_int("AI_API_MAX_RETRIES", 2),
+    "api_retry_attempts": _get_env_int("AI_API_RETRY_ATTEMPTS", 2),
+    "api_retry_backoff_seconds": _get_env_float("AI_API_RETRY_BACKOFF_SECONDS", 2.0),
     # 适配长视频总结：按模型上下文窗口做 token 预算（DeepSeek 文档：128K）
     "context_window_tokens": int(os.getenv("AI_CONTEXT_WINDOW_TOKENS", "128000")),
     # DeepSeek-chat 默认 max output 4K（可在 .env 覆盖；若你开到 8K 也可写 8000）

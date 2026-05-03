@@ -5,10 +5,12 @@ AI客户端模块
 统一封装对各种AI服务的调用（DeepSeek、智谱AI、通义千问等）
 """
 
+import asyncio
 import logging
 from typing import Optional
 
-from openai import AsyncOpenAI
+import httpx
+from openai import APIConnectionError, APITimeoutError, AsyncOpenAI
 
 
 class AIClient:
@@ -36,6 +38,11 @@ class AIClient:
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
         model: Optional[str] = None,
+        request_timeout_seconds: int = 120,
+        connect_timeout_seconds: int = 20,
+        max_retries: int = 2,
+        retry_attempts: int = 2,
+        retry_backoff_seconds: float = 2.0,
     ):
         """
         初始化AI客户端
@@ -61,11 +68,19 @@ class AIClient:
         # 使用提供的配置或默认配置
         self.base_url = base_url or config["base_url"]
         self.model = model or config["model"]
+        self.retry_attempts = max(1, retry_attempts)
+        self.retry_backoff_seconds = max(0.1, retry_backoff_seconds)
 
         # 创建OpenAI客户端
+        timeout = httpx.Timeout(
+            timeout=max(1, request_timeout_seconds),
+            connect=max(1, connect_timeout_seconds),
+        )
         self.client = AsyncOpenAI(
             api_key=api_key,
             base_url=self.base_url,
+            timeout=timeout,
+            max_retries=max(0, max_retries),
         )
 
         self.logger.info(
@@ -92,36 +107,50 @@ class AIClient:
         Returns:
             AI生成的文本，失败返回None
         """
-        try:
-            self.logger.debug(
-                f"调用AI服务: model={self.model}, messages={len(messages)}条"
-            )
+        self.logger.debug(f"调用AI服务: model={self.model}, messages={len(messages)}条")
 
-            # 调用API
-            response = await self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
-
-            # 提取返回内容
-            if response.choices and len(response.choices) > 0:
-                content = response.choices[0].message.content
-                self.last_error = None
-                self.logger.info(
-                    f"AI响应成功，长度: {len(content) if content else 0} 字符"
+        for attempt in range(1, self.retry_attempts + 1):
+            try:
+                response = await self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
                 )
-                return content
-            else:
+
+                if response.choices and len(response.choices) > 0:
+                    content = response.choices[0].message.content
+                    self.last_error = None
+                    self.logger.info(
+                        f"AI响应成功，长度: {len(content) if content else 0} 字符"
+                    )
+                    return content
+
                 self.last_error = "AI响应为空"
                 self.logger.error(self.last_error)
                 return None
 
-        except Exception as e:
-            self.last_error = str(e)
-            self.logger.error(f"调用AI服务失败: {e}", exc_info=True)
-            return None
+            except (APITimeoutError, APIConnectionError) as e:
+                self.last_error = str(e)
+                if attempt >= self.retry_attempts:
+                    self.logger.error(f"调用AI服务失败: {e}", exc_info=True)
+                    return None
+
+                backoff_seconds = self.retry_backoff_seconds * attempt
+                self.logger.warning(
+                    "调用AI服务超时/连接失败，准备重试 (%s/%s): %s",
+                    attempt,
+                    self.retry_attempts,
+                    e,
+                )
+                await asyncio.sleep(backoff_seconds)
+
+            except Exception as e:
+                self.last_error = str(e)
+                self.logger.error(f"调用AI服务失败: {e}", exc_info=True)
+                return None
+
+        return None
 
     async def summarize_text(
         self,

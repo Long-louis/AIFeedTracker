@@ -1,10 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Feishu webhook sender (registry-driven).
+"""Feishu sender (registry-driven).
 
 Design goals:
-- Webhook-only (no app mode) for maximum simplicity.
-- All routing is done by a local channel registry file (data/feishu_channels.json).
-- Business code only passes channel names like "webhook:default".
+- Routing is done by a local channel registry file (data/feishu_channels.json).
+- Business code only passes channel names like "webhook:default" / "app:default".
 """
 
 from __future__ import annotations
@@ -316,8 +315,11 @@ class FeishuBot:
             self.logger.error("lark-oapi 不可用: 无法使用 app 通道发送卡片消息")
             return False
 
-        if not app_cfg.get("user_open_id"):
-            self.logger.error("app 通道未配置 user_open_id，无法发送消息")
+        if not app_cfg.get("receive_id"):
+            self.logger.error("app 通道未配置 receive_id，无法发送消息")
+            return False
+        if not app_cfg.get("receive_id_type"):
+            self.logger.error("app 通道未配置 receive_id_type，无法发送消息")
             return False
 
         try:
@@ -351,11 +353,11 @@ class FeishuBot:
             request = (
                 sdk["CreateMessageRequest"]
                 .builder()
-                .receive_id_type("open_id")
+                .receive_id_type(app_cfg.get("receive_id_type"))
                 .request_body(
                     sdk["CreateMessageRequestBody"]
                     .builder()
-                    .receive_id(app_cfg.get("user_open_id"))
+                    .receive_id(app_cfg.get("receive_id"))
                     .msg_type("interactive")
                     .content(json.dumps(card_content, ensure_ascii=False))
                     .build()
@@ -460,13 +462,13 @@ class FeishuBot:
                     request = (
                         sdk["CreateMessageRequest"]
                         .builder()
-                        .receive_id_type("open_id")
+                        .receive_id_type(cfg.get("receive_id_type"))
                         .request_body(
                             sdk["CreateMessageRequestBody"]
                             .builder()
-                            .receive_id(cfg.get("user_open_id"))
+                            .receive_id(cfg.get("receive_id"))
                             .msg_type("text")
-                            .content(text)
+                            .content(json.dumps({"text": text}, ensure_ascii=False))
                             .build()
                         )
                         .build()

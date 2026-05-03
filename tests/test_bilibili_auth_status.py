@@ -65,7 +65,7 @@ async def check_bilibili_auth():
             print("  2. Cookie格式错误")
             print("  3. 网络问题")
             print("\n建议操作:")
-            print("  1. 重新获取B站登录信息（参考 docs/BILIBILI_SETUP.md）")
+            print("  1. 重新获取B站登录信息（参考 docs/Configuration.md）")
             print("  2. 检查网络连接")
             return False
 
@@ -158,7 +158,7 @@ async def check_bilibili_auth():
             if error_type == SubtitleErrorType.COOKIE_EXPIRED:
                 print("\n⚠️  诊断结果: Cookie已失效")
                 print("   建议操作:")
-                print("   1. 重新获取B站登录信息（参考 docs/BILIBILI_SETUP.md）")
+                print("   1. 重新获取B站登录信息（参考 docs/Configuration.md）")
                 print("   2. 更新.env文件中的SESSDATA等配置")
                 return False  # Cookie失效是严重问题
             elif error_type == SubtitleErrorType.CREDENTIAL_ERROR:

@@ -10,6 +10,7 @@ import re
 import time
 from json import JSONDecodeError
 from datetime import datetime
+from urllib.parse import quote
 from typing import Any, Dict, List, Optional
 
 import aiohttp
@@ -22,6 +23,8 @@ class FeishuDocsService:
     """把视频总结写入飞书知识库文档（根 -> 博主 -> YYYY-MM -> 视频文档）。"""
 
     _API_BASE = "https://open.feishu.cn/open-apis"
+    _MARKDOWN_CONVERT_SCOPE = "docx:document.block:convert"
+    _DOC_CHILDREN_BATCH_SIZE = 50
 
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
@@ -39,6 +42,7 @@ class FeishuDocsService:
         self.request_timeout_seconds = int(
             self.config.get("request_timeout_seconds") or 30
         )
+        self.tenant_host = str(self.config.get("tenant_host") or "").strip()
 
         self._tenant_access_token: Optional[str] = None
         self._tenant_access_token_expire_ts = 0.0
@@ -103,6 +107,54 @@ class FeishuDocsService:
     @staticmethod
     def _hash_summary(summary_markdown: str) -> str:
         return hashlib.sha256(summary_markdown.encode("utf-8")).hexdigest()
+
+    def _wiki_host(self) -> str:
+        host = self.tenant_host or "feishu.cn"
+        if host.startswith("https://"):
+            host = host[len("https://") :]
+        elif host.startswith("http://"):
+            host = host[len("http://") :]
+        return host.rstrip("/") or "feishu.cn"
+
+    @staticmethod
+    def _extract_doc_token_from_url(url: str) -> str:
+        if not url:
+            return ""
+        matched = re.search(r"/docx/([^/?#]+)", url)
+        return matched.group(1) if matched else ""
+
+    async def _resolve_wiki_node_token_by_doc_token(
+        self, token: str, doc_token: str
+    ) -> str:
+        if not doc_token:
+            return ""
+        encoded_doc_token = quote(doc_token, safe="")
+        data = await self._request_json(
+            "GET",
+            f"/wiki/v2/spaces/get_node?token={encoded_doc_token}&obj_type=docx",
+            token=token,
+        )
+        node = data.get("node") if isinstance(data.get("node"), dict) else data
+        return str(node.get("node_token") or "")
+
+    async def to_shareable_url(self, url: str) -> str:
+        doc_token = self._extract_doc_token_from_url(url)
+        if not doc_token or not self.enabled:
+            return url
+
+        try:
+            token = await self._get_tenant_access_token()
+            node_token = await self._resolve_wiki_node_token_by_doc_token(
+                token,
+                doc_token,
+            )
+        except Exception as exc:
+            self.logger.warning("解析知识库预览链接失败，保留原始链接: %s", exc)
+            return url
+
+        if not node_token:
+            return url
+        return f"https://{self._wiki_host()}/wiki/{node_token}"
 
     async def _request_json(
         self,
@@ -210,28 +262,250 @@ class FeishuDocsService:
             token=token,
             payload=payload,
         )
-        node = data.get("node") or data
+        node = data.get("node") if isinstance(data.get("node"), dict) else data
         return {
-            "node_token": str(node.get("node_token") or ""),
-            "obj_token": str(node.get("obj_token") or ""),
-            "url": str(node.get("url") or ""),
+            "node_token": str(node.get("node_token") or data.get("node_token") or ""),
+            "obj_token": str(node.get("obj_token") or data.get("obj_token") or ""),
+            "url": str(data.get("url") or node.get("url") or ""),
         }
 
     async def _replace_doc_content(
         self, token: str, doc_token: str, markdown: str
     ) -> None:
         await self._clear_doc_children(token, doc_token)
-        blocks = self._markdown_to_text_blocks(markdown)
+        write_payload = await self._convert_markdown_to_blocks(token, markdown)
+        write_mode = write_payload.get("mode")
+
+        if write_mode == "descendant":
+            children_id = write_payload.get("children_id") or []
+            descendants = write_payload.get("descendants") or []
+            if not children_id or not descendants:
+                return
+            await self._request_json(
+                "POST",
+                f"/docx/v1/documents/{doc_token}/blocks/{doc_token}/descendant?document_revision_id=-1",
+                token=token,
+                payload={
+                    "children_id": children_id,
+                    "descendants": descendants,
+                },
+            )
+            return
+
+        blocks = write_payload.get("children") or []
         if not blocks:
             return
 
-        for index in range(0, len(blocks), 50):
+        for index in range(0, len(blocks), self._DOC_CHILDREN_BATCH_SIZE):
             await self._request_json(
                 "POST",
                 f"/docx/v1/documents/{doc_token}/blocks/{doc_token}/children",
                 token=token,
-                payload={"children": blocks[index : index + 50]},
+                payload={
+                    "children": blocks[index : index + self._DOC_CHILDREN_BATCH_SIZE]
+                },
             )
+
+    async def _convert_markdown_to_blocks(
+        self, token: str, markdown: str
+    ) -> Dict[str, Any]:
+        normalized_markdown = (markdown or "").strip()
+        if not normalized_markdown:
+            normalized_markdown = "（暂无总结内容）"
+
+        try:
+            data = await self._request_json(
+                "POST",
+                "/docx/v1/documents/blocks/convert",
+                token=token,
+                payload={
+                    "content_type": "markdown",
+                    "content": normalized_markdown,
+                },
+            )
+            descendant_payload = self._extract_convert_descendant_payload(data)
+            if descendant_payload:
+                return {
+                    "mode": "descendant",
+                    "children_id": descendant_payload["children_id"],
+                    "descendants": descendant_payload["descendants"],
+                }
+
+            blocks = self._extract_converted_blocks(data)
+            if blocks:
+                return {
+                    "mode": "children",
+                    "children": blocks,
+                }
+            self.logger.warning("Markdown 转文档块接口返回空结果，回退为纯文本块")
+        except Exception as exc:
+            message = str(exc)
+            if self._MARKDOWN_CONVERT_SCOPE in message:
+                self.logger.warning(
+                    "缺少飞书权限 %s，文档将以纯文本块写入。请在应用权限中开通后重试。",
+                    self._MARKDOWN_CONVERT_SCOPE,
+                )
+            else:
+                self.logger.warning("Markdown 转文档块失败，回退为纯文本块: %s", exc)
+
+        return {
+            "mode": "children",
+            "children": self._markdown_to_text_blocks(normalized_markdown),
+        }
+
+    @classmethod
+    def _extract_convert_descendant_payload(
+        cls, data: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        if not isinstance(data, dict):
+            return None
+
+        first_level_block_ids = data.get("first_level_block_ids")
+        blocks_payload = data.get("blocks")
+        if not isinstance(first_level_block_ids, list) or not isinstance(
+            blocks_payload, list
+        ):
+            return None
+
+        descendants: List[Dict[str, Any]] = []
+        valid_block_ids = set()
+        for block in blocks_payload:
+            sanitized = cls._sanitize_descendant_block(block)
+            if not sanitized:
+                continue
+            descendants.append(sanitized)
+            valid_block_ids.add(sanitized["block_id"])
+
+        if not descendants:
+            return None
+
+        children_id = [
+            str(block_id)
+            for block_id in first_level_block_ids
+            if str(block_id) in valid_block_ids
+        ]
+        if not children_id:
+            return None
+
+        return {
+            "children_id": children_id,
+            "descendants": descendants,
+        }
+
+    @classmethod
+    def _sanitize_descendant_block(cls, block: Any) -> Optional[Dict[str, Any]]:
+        if not isinstance(block, dict):
+            return None
+
+        block_id = block.get("block_id")
+        block_type = block.get("block_type")
+        if not block_id or not isinstance(block_type, int):
+            return None
+
+        sanitized: Dict[str, Any] = {
+            "block_id": str(block_id),
+            "block_type": block_type,
+            "children": [],
+        }
+
+        children = block.get("children")
+        if isinstance(children, list):
+            sanitized["children"] = [
+                str(child)
+                for child in children
+                if isinstance(child, (str, int)) and str(child)
+            ]
+
+        ignored_keys = {
+            "revision_id",
+            "parent_id",
+            "wiki_token",
+        }
+        for key, value in block.items():
+            if key in ignored_keys or key in {"block_id", "block_type", "children"}:
+                continue
+            sanitized_value = cls._remove_readonly_fields(value)
+            if sanitized_value is not None:
+                sanitized[key] = sanitized_value
+
+        return sanitized
+
+    @classmethod
+    def _remove_readonly_fields(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            result: Dict[str, Any] = {}
+            for key, item in value.items():
+                if key == "merge_info" or item is None:
+                    continue
+                cleaned = cls._remove_readonly_fields(item)
+                if cleaned is not None:
+                    result[key] = cleaned
+            return result
+        if isinstance(value, list):
+            return [
+                cleaned
+                for item in value
+                if (cleaned := cls._remove_readonly_fields(item)) is not None
+            ]
+        return value
+
+    @staticmethod
+    def _extract_converted_blocks(data: Dict[str, Any]) -> List[Dict[str, Any]]:
+        if not isinstance(data, dict):
+            return []
+
+        first_level_block_ids = data.get("first_level_block_ids")
+        blocks_payload = data.get("blocks")
+        if isinstance(first_level_block_ids, list) and isinstance(blocks_payload, list):
+            blocks_by_id = {
+                str(item.get("block_id")): item
+                for item in blocks_payload
+                if isinstance(item, dict) and item.get("block_id")
+            }
+            ordered_blocks: List[Dict[str, Any]] = []
+            for block_id in first_level_block_ids:
+                block = blocks_by_id.get(str(block_id))
+                sanitized = FeishuDocsService._sanitize_converted_block(block)
+                if sanitized:
+                    ordered_blocks.append(sanitized)
+            if ordered_blocks:
+                return ordered_blocks
+
+        for key in ("children", "blocks", "items"):
+            value = data.get(key)
+            if isinstance(value, list):
+                return [
+                    sanitized
+                    for item in value
+                    if (sanitized := FeishuDocsService._sanitize_converted_block(item))
+                ]
+        return []
+
+    @staticmethod
+    def _sanitize_converted_block(block: Any) -> Optional[Dict[str, Any]]:
+        if not isinstance(block, dict):
+            return None
+
+        block_type = block.get("block_type")
+        if not isinstance(block_type, int):
+            return None
+
+        sanitized: Dict[str, Any] = {"block_type": block_type}
+        ignored_keys = {
+            "block_id",
+            "revision_id",
+            "parent_id",
+            "children",
+            "wiki_token",
+        }
+
+        for key, value in block.items():
+            if key in ignored_keys or key == "block_type" or value is None:
+                continue
+            if isinstance(value, (dict, list)):
+                sanitized[key] = value
+
+        return sanitized
 
     async def _clear_doc_children(self, token: str, doc_token: str) -> None:
         data = await self._request_json(

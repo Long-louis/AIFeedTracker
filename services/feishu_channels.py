@@ -3,11 +3,9 @@
 
 Goal: keep notification routing clean and configurable.
 
-- A "channel" is a string like "webhook:<name>".
-- All webhook URLs/secrets and defaults live in a local JSON file.
-- Business code only passes channel names; it never touches URLs.
-
-This module is intentionally webhook-only for simplicity.
+- A "channel" is a string like "webhook:<name>" or "app:<name>".
+- Webhook and app targets both live in a local JSON file.
+- Business code only passes channel names; it never touches raw endpoints/IDs.
 """
 
 from __future__ import annotations
@@ -27,7 +25,7 @@ class WebhookConfig:
 
 
 class FeishuChannelRegistry:
-    """Loads and resolves Feishu channels (webhook-only)."""
+    """Loads and resolves Feishu channels."""
 
     def __init__(self, raw: Dict[str, Any]):
         self._raw = raw or {}
@@ -56,7 +54,7 @@ class FeishuChannelRegistry:
                     url=url, secret=secret
                 )
 
-        # apps: optional app-mode configs (lazy-loaded when used)
+        # apps: optional app-mode configs (loaded when used)
         self._apps: Dict[str, Dict[str, str]] = {}
         apps = self._raw.get("apps")
         if isinstance(apps, dict):
@@ -65,12 +63,14 @@ class FeishuChannelRegistry:
                     continue
                 app_id = str(cfg.get("app_id") or "").strip()
                 app_secret = str(cfg.get("app_secret") or "").strip()
-                user_open_id = str(cfg.get("user_open_id") or "").strip()
-                if app_id and app_secret:
+                receive_id = str(cfg.get("receive_id") or "").strip()
+                receive_id_type = str(cfg.get("receive_id_type") or "").strip()
+                if app_id and app_secret and receive_id and receive_id_type:
                     self._apps[str(name).strip()] = {
                         "app_id": app_id,
                         "app_secret": app_secret,
-                        "user_open_id": user_open_id,
+                        "receive_id": receive_id,
+                        "receive_id_type": receive_id_type,
                     }
 
     @classmethod

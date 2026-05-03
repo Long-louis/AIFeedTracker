@@ -71,6 +71,13 @@ class AISummaryService:
                 api_key=api_key,
                 base_url=AI_CONFIG.get("base_url"),
                 model=AI_CONFIG.get("model"),
+                request_timeout_seconds=AI_CONFIG.get("api_timeout_seconds", 120),
+                connect_timeout_seconds=AI_CONFIG.get(
+                    "api_connect_timeout_seconds", 20
+                ),
+                max_retries=AI_CONFIG.get("api_max_retries", 2),
+                retry_attempts=AI_CONFIG.get("api_retry_attempts", 2),
+                retry_backoff_seconds=AI_CONFIG.get("api_retry_backoff_seconds", 2.0),
             )
 
             self.summary_generator = SummaryGenerator(self.ai_client)

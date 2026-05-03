@@ -9,7 +9,7 @@ from .service import AISummaryService, VideoSummaryResult
 from .audio_source_fetcher import AudioFetchErrorType
 from .audio_transcription_service import AudioTranscriptionService
 from .subtitle_fetcher import SubtitleErrorType
-from .whisper_transcriber import ASRErrorType
+from .sensevoice_client import ASRErrorType
 
 __all__ = [
     "AISummaryService",

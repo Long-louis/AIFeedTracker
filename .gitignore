@@ -49,6 +49,9 @@ log/
 # Data files (contain runtime state and credentials)
 # 忽略运行时状态文件
 data/bilibili_state.json
+data/feishu_doc_state.json
+data/models/
+data/temp_asr*/
 data/*.bak
 data/*.tmp
 # 本地私有配置文件

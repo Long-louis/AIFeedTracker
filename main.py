@@ -207,9 +207,9 @@ async def main():
     parser = argparse.ArgumentParser(description="AI视频机器人")
     parser.add_argument(
         "--mode",
-        choices=["monitor", "test", "service"],
+        choices=["monitor", "test", "service", "creator-admin"],
         default="monitor",
-        help="运行模式: monitor(监控模式), test(测试模式) 或 service(服务模式)",
+        help="运行模式: monitor(监控模式), test(测试模式), service(服务模式) 或 creator-admin(创作者管理页)",
     )
     parser.add_argument("--once", action="store_true", help="仅运行一次检查")
     parser.add_argument(
@@ -218,6 +218,12 @@ async def main():
     parser.add_argument("--video", type=str, help="测试模式下要总结的视频URL")
 
     args = parser.parse_args()
+
+    if args.mode == "creator-admin":
+        from creator_admin.__main__ import main as creator_admin_main
+
+        creator_admin_main()
+        return
 
     # 创建机器人实例
     bot = AIVideoBot()

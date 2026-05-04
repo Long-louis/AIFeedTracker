@@ -82,7 +82,7 @@ def create_app(
             auth.sign("admin"),
             httponly=True,
             samesite="lax",
-            secure=settings.env == "production",
+            secure=settings.cookie_secure,
             max_age=settings.cookie_ttl_seconds,
         )
         return response

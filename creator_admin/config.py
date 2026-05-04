@@ -13,6 +13,7 @@ class AdminSettings:
     env: str
     cookie_name: str
     cookie_ttl_seconds: int
+    cookie_secure: bool
 
     @classmethod
     def from_env(cls) -> "AdminSettings":
@@ -24,6 +25,7 @@ class AdminSettings:
         secret_key = os.getenv("CREATOR_ADMIN_SECRET_KEY", "")
         cookie_name = os.getenv("CREATOR_ADMIN_COOKIE_NAME", "creator_admin_session")
         ttl_raw = os.getenv("CREATOR_ADMIN_COOKIE_TTL_SECONDS", "86400")
+        secure_raw = os.getenv("CREATOR_ADMIN_COOKIE_SECURE", "").strip().lower()
 
         if not password:
             raise ValueError("CREATOR_ADMIN_PASSWORD is required")
@@ -51,6 +53,13 @@ class AdminSettings:
             if not secret_key:
                 secret_key = secrets.token_urlsafe(48)
 
+        if secure_raw:
+            if secure_raw not in {"1", "true", "yes", "on", "0", "false", "no", "off"}:
+                raise ValueError("CREATOR_ADMIN_COOKIE_SECURE must be a boolean")
+            cookie_secure = secure_raw in {"1", "true", "yes", "on"}
+        else:
+            cookie_secure = env == "production"
+
         return cls(
             host=host,
             port=port,
@@ -60,4 +69,5 @@ class AdminSettings:
             env=env,
             cookie_name=cookie_name,
             cookie_ttl_seconds=cookie_ttl_seconds,
+            cookie_secure=cookie_secure,
         )

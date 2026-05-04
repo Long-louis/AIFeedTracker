@@ -80,6 +80,19 @@ class TestAdminSettings(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "minimum length is 32"):
                 AdminSettings.from_env()
 
+    def test_from_env_allows_disabling_secure_cookie_for_plain_http(self):
+        env = {
+            "CREATOR_ADMIN_PASSWORD": "secret-password",
+            "CREATOR_ADMIN_ENV": "production",
+            "CREATOR_ADMIN_SECRET_KEY": "k" * 32,
+            "CREATOR_ADMIN_COOKIE_SECURE": "false",
+        }
+
+        with patch.dict(os.environ, env, clear=True):
+            settings = AdminSettings.from_env()
+
+        self.assertFalse(settings.cookie_secure)
+
 
 class TestCookieAuth(unittest.TestCase):
     def test_sign_and_verify_success(self):

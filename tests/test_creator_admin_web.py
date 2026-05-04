@@ -49,6 +49,7 @@ class TestCreatorAdminWeb(unittest.IsolatedAsyncioTestCase):
             env="test",
             cookie_name="creator_admin_session",
             cookie_ttl_seconds=3600,
+            cookie_secure=False,
         )
         self.store = CreatorStore(self.data_path)
 

@@ -142,6 +142,47 @@ class TestFeishuDocsBlockConversion(unittest.TestCase):
         self.assertEqual(len(blocks), 1)
         self.assertEqual(blocks[0]["block_type"], 3)
 
+    def test_extract_converted_blocks_rebuilds_first_level_from_convert_payload(self):
+        blocks = FeishuDocsService._extract_converted_blocks(
+            {
+                "first_level_block_ids": ["h1", "p1"],
+                "blocks": [
+                    {
+                        "block_id": "h1",
+                        "revision_id": 0,
+                        "parent_id": "",
+                        "children": ["child1"],
+                        "block_type": 3,
+                        "heading1": {"elements": [{"text_run": {"content": "标题"}}]},
+                    },
+                    {
+                        "block_id": "child1",
+                        "revision_id": 0,
+                        "parent_id": "h1",
+                        "children": [],
+                        "block_type": 2,
+                        "text": {"elements": [{"text_run": {"content": "嵌套内容"}}]},
+                    },
+                    {
+                        "block_id": "p1",
+                        "revision_id": 0,
+                        "parent_id": "",
+                        "children": [],
+                        "block_type": 2,
+                        "text": {"elements": [{"text_run": {"content": "段落"}}]},
+                    },
+                ],
+            }
+        )
+
+        self.assertEqual(len(blocks), 2)
+        self.assertEqual(blocks[0]["block_type"], 3)
+        self.assertEqual(blocks[1]["block_type"], 2)
+        self.assertNotIn("block_id", blocks[0])
+        self.assertNotIn("revision_id", blocks[0])
+        self.assertNotIn("parent_id", blocks[0])
+        self.assertNotIn("children", blocks[0])
+
     def test_markdown_to_text_blocks_keeps_non_empty_lines(self):
         blocks = FeishuDocsService._markdown_to_text_blocks(
             "## 关键信息和观点\n- 要点A\n\n## 时间线总结\n- 00:00 开场"
@@ -162,7 +203,7 @@ class TestFeishuDocsBlockConversion(unittest.TestCase):
 
 
 class TestFeishuDocsMarkdownConvert(unittest.IsolatedAsyncioTestCase):
-    async def test_convert_markdown_to_blocks_prefers_convert_api(self):
+    async def test_convert_markdown_to_blocks_prefers_descendant_payload(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             state_path = f"{tmpdir}/feishu_doc_state.json"
             service = _FakeFeishuDocsService(state_path)
@@ -170,22 +211,27 @@ class TestFeishuDocsMarkdownConvert(unittest.IsolatedAsyncioTestCase):
             async def _fake_request_json(method, path, **kwargs):
                 if path == "/docx/v1/documents/blocks/convert":
                     return {
-                        "children": [
+                        "first_level_block_ids": ["h1"],
+                        "blocks": [
                             {
+                                "block_id": "h1",
                                 "block_type": 3,
+                                "children": [],
                                 "heading1": {
                                     "elements": [{"text_run": {"content": "标题"}}]
                                 },
                             }
-                        ]
+                        ],
                     }
                 raise AssertionError(f"unexpected path: {path}")
 
             service._request_json = _fake_request_json  # type: ignore[method-assign]
 
-            blocks = await service._convert_markdown_to_blocks("token", "# 标题")
-            self.assertEqual(len(blocks), 1)
-            self.assertEqual(blocks[0]["block_type"], 3)
+            write_payload = await service._convert_markdown_to_blocks("token", "# 标题")
+            self.assertEqual(write_payload["mode"], "descendant")
+            self.assertEqual(write_payload["children_id"], ["h1"])
+            self.assertEqual(len(write_payload["descendants"]), 1)
+            self.assertEqual(write_payload["descendants"][0]["block_type"], 3)
 
     async def test_convert_markdown_to_blocks_falls_back_when_scope_missing(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -199,9 +245,11 @@ class TestFeishuDocsMarkdownConvert(unittest.IsolatedAsyncioTestCase):
 
             service._request_json = _fake_request_json  # type: ignore[method-assign]
 
-            blocks = await service._convert_markdown_to_blocks(
+            write_payload = await service._convert_markdown_to_blocks(
                 "token", "## 关键信息和观点\n- 要点A"
             )
+            self.assertEqual(write_payload["mode"], "children")
+            blocks = write_payload["children"]
             self.assertEqual(len(blocks), 2)
             self.assertEqual(
                 blocks[0]["text"]["elements"][0]["text_run"]["content"],
@@ -210,6 +258,154 @@ class TestFeishuDocsMarkdownConvert(unittest.IsolatedAsyncioTestCase):
 
 
 class TestFeishuDocsReplaceContent(unittest.IsolatedAsyncioTestCase):
+    async def test_replace_doc_content_uses_descendant_for_convert_payload(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = f"{tmpdir}/feishu_doc_state.json"
+            service = FeishuDocsService(
+                {
+                    "enabled": True,
+                    "app_id": "app-id",
+                    "app_secret": "app-secret",
+                    "wiki_space_id": "space-token",
+                    "root_node_token": "",
+                    "root_title": "AI视频知识库",
+                    "state_path": state_path,
+                    "request_timeout_seconds": 5,
+                }
+            )
+            descendant_payloads = []
+            children_calls = []
+
+            async def _fake_request_json(method, path, **kwargs):
+                if method == "GET" and path.endswith("children?page_size=500"):
+                    return {"items": []}
+                if method == "POST" and path == "/docx/v1/documents/blocks/convert":
+                    return {
+                        "first_level_block_ids": ["h1", "p1"],
+                        "blocks": [
+                            {
+                                "block_id": "h1",
+                                "revision_id": 1,
+                                "parent_id": "",
+                                "children": [],
+                                "block_type": 3,
+                                "heading1": {
+                                    "elements": [{"text_run": {"content": "标题"}}]
+                                },
+                            },
+                            {
+                                "block_id": "p1",
+                                "revision_id": 1,
+                                "parent_id": "",
+                                "children": [],
+                                "block_type": 2,
+                                "text": {
+                                    "elements": [{"text_run": {"content": "段落"}}]
+                                },
+                            },
+                        ],
+                    }
+                if (
+                    method == "POST"
+                    and path
+                    == "/docx/v1/documents/doc-token/blocks/doc-token/descendant?document_revision_id=-1"
+                ):
+                    descendant_payloads.append(kwargs.get("payload", {}))
+                    return {}
+                if (
+                    method == "POST"
+                    and path == "/docx/v1/documents/doc-token/blocks/doc-token/children"
+                ):
+                    children_calls.append(kwargs.get("payload", {}))
+                    return {}
+                raise AssertionError(f"unexpected request: {method} {path}")
+
+            service._request_json = _fake_request_json  # type: ignore[method-assign]
+
+            await service._replace_doc_content(
+                token="token",
+                doc_token="doc-token",
+                markdown="## 关键信息和观点\n- A\n\n## 时间线总结\n- 00:00 B",
+            )
+
+            self.assertEqual(len(descendant_payloads), 1)
+            self.assertEqual(children_calls, [])
+            self.assertEqual(descendant_payloads[0]["children_id"], ["h1", "p1"])
+            self.assertEqual(len(descendant_payloads[0]["descendants"]), 2)
+
+    async def test_replace_doc_content_fallbacks_to_children_on_descendant_schema_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = f"{tmpdir}/feishu_doc_state.json"
+            service = FeishuDocsService(
+                {
+                    "enabled": True,
+                    "app_id": "app-id",
+                    "app_secret": "app-secret",
+                    "wiki_space_id": "space-token",
+                    "root_node_token": "",
+                    "root_title": "AI视频知识库",
+                    "state_path": state_path,
+                    "request_timeout_seconds": 5,
+                }
+            )
+            descendant_calls = 0
+            children_calls = []
+
+            async def _fake_request_json(method, path, **kwargs):
+                nonlocal descendant_calls
+                if method == "GET" and path.endswith("children?page_size=500"):
+                    return {"items": []}
+                if method == "POST" and path == "/docx/v1/documents/blocks/convert":
+                    return {
+                        "first_level_block_ids": ["h1", "p1"],
+                        "blocks": [
+                            {
+                                "block_id": "h1",
+                                "block_type": 3,
+                                "children": [],
+                                "heading1": {
+                                    "elements": [{"text_run": {"content": "标题"}}]
+                                },
+                            },
+                            {
+                                "block_id": "p1",
+                                "block_type": 2,
+                                "children": [],
+                                "text": {
+                                    "elements": [{"text_run": {"content": "段落"}}]
+                                },
+                            },
+                        ],
+                    }
+                if (
+                    method == "POST"
+                    and path
+                    == "/docx/v1/documents/doc-token/blocks/doc-token/descendant?document_revision_id=-1"
+                ):
+                    descendant_calls += 1
+                    raise RuntimeError(
+                        "HTTP 400: {'code': 1770006, 'msg': 'schema mismatch'}"
+                    )
+                if (
+                    method == "POST"
+                    and path == "/docx/v1/documents/doc-token/blocks/doc-token/children"
+                ):
+                    children_calls.append(kwargs.get("payload", {}))
+                    return {}
+                raise AssertionError(f"unexpected request: {method} {path}")
+
+            service._request_json = _fake_request_json  # type: ignore[method-assign]
+
+            await service._replace_doc_content(
+                token="token",
+                doc_token="doc-token",
+                markdown="## 关键信息和观点\n- A\n\n## 时间线总结\n- 00:00 B",
+            )
+
+            self.assertEqual(descendant_calls, 1)
+            self.assertEqual(len(children_calls), 1)
+            self.assertEqual(len(children_calls[0]["children"]), 2)
+
     async def test_replace_doc_content_sends_children_in_batches_of_50(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             state_path = f"{tmpdir}/feishu_doc_state.json"

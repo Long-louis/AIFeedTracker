@@ -273,10 +273,42 @@ class FeishuDocsService:
         self, token: str, doc_token: str, markdown: str
     ) -> None:
         await self._clear_doc_children(token, doc_token)
-        blocks = await self._convert_markdown_to_blocks(token, markdown)
-        if not blocks:
-            return
+        write_payload = await self._convert_markdown_to_blocks(token, markdown)
+        write_mode = write_payload.get("mode")
+        try:
+            if write_mode == "descendant":
+                children_id = write_payload.get("children_id") or []
+                descendants = write_payload.get("descendants") or []
+                if not children_id or not descendants:
+                    return
+                await self._request_json(
+                    "POST",
+                    f"/docx/v1/documents/{doc_token}/blocks/{doc_token}/descendant?document_revision_id=-1",
+                    token=token,
+                    payload={
+                        "children_id": children_id,
+                        "descendants": descendants,
+                    },
+                )
+                return
 
+            blocks = write_payload.get("children") or []
+            if not blocks:
+                return
+
+            await self._append_doc_children_in_batches(token, doc_token, blocks)
+        except Exception as exc:
+            if not self._is_schema_mismatch_error(exc):
+                raise
+            self.logger.warning(
+                "飞书文档块写入 schema mismatch，回退为纯文本块重试: %s", exc
+            )
+            fallback_blocks = self._markdown_to_text_blocks(markdown)
+            await self._append_doc_children_in_batches(token, doc_token, fallback_blocks)
+
+    async def _append_doc_children_in_batches(
+        self, token: str, doc_token: str, blocks: List[Dict[str, Any]]
+    ) -> None:
         for index in range(0, len(blocks), self._DOC_CHILDREN_BATCH_SIZE):
             await self._request_json(
                 "POST",
@@ -287,9 +319,14 @@ class FeishuDocsService:
                 },
             )
 
+    @staticmethod
+    def _is_schema_mismatch_error(exc: Exception) -> bool:
+        message = str(exc).lower()
+        return "schema mismatch" in message or "1770006" in message
+
     async def _convert_markdown_to_blocks(
         self, token: str, markdown: str
-    ) -> List[Dict[str, Any]]:
+    ) -> Dict[str, Any]:
         normalized_markdown = (markdown or "").strip()
         if not normalized_markdown:
             normalized_markdown = "（暂无总结内容）"
@@ -304,9 +341,20 @@ class FeishuDocsService:
                     "content": normalized_markdown,
                 },
             )
+            descendant_payload = self._extract_convert_descendant_payload(data)
+            if descendant_payload:
+                return {
+                    "mode": "descendant",
+                    "children_id": descendant_payload["children_id"],
+                    "descendants": descendant_payload["descendants"],
+                }
+
             blocks = self._extract_converted_blocks(data)
             if blocks:
-                return blocks
+                return {
+                    "mode": "children",
+                    "children": blocks,
+                }
             self.logger.warning("Markdown 转文档块接口返回空结果，回退为纯文本块")
         except Exception as exc:
             message = str(exc)
@@ -318,18 +366,164 @@ class FeishuDocsService:
             else:
                 self.logger.warning("Markdown 转文档块失败，回退为纯文本块: %s", exc)
 
-        return self._markdown_to_text_blocks(normalized_markdown)
+        return {
+            "mode": "children",
+            "children": self._markdown_to_text_blocks(normalized_markdown),
+        }
+
+    @classmethod
+    def _extract_convert_descendant_payload(
+        cls, data: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        if not isinstance(data, dict):
+            return None
+
+        first_level_block_ids = data.get("first_level_block_ids")
+        blocks_payload = data.get("blocks")
+        if not isinstance(first_level_block_ids, list) or not isinstance(
+            blocks_payload, list
+        ):
+            return None
+
+        descendants: List[Dict[str, Any]] = []
+        valid_block_ids = set()
+        for block in blocks_payload:
+            sanitized = cls._sanitize_descendant_block(block)
+            if not sanitized:
+                continue
+            descendants.append(sanitized)
+            valid_block_ids.add(sanitized["block_id"])
+
+        if not descendants:
+            return None
+
+        children_id = [
+            str(block_id)
+            for block_id in first_level_block_ids
+            if str(block_id) in valid_block_ids
+        ]
+        if not children_id:
+            return None
+
+        return {
+            "children_id": children_id,
+            "descendants": descendants,
+        }
+
+    @classmethod
+    def _sanitize_descendant_block(cls, block: Any) -> Optional[Dict[str, Any]]:
+        if not isinstance(block, dict):
+            return None
+
+        block_id = block.get("block_id")
+        block_type = block.get("block_type")
+        if not block_id or not isinstance(block_type, int):
+            return None
+
+        sanitized: Dict[str, Any] = {
+            "block_id": str(block_id),
+            "block_type": block_type,
+            "children": [],
+        }
+
+        children = block.get("children")
+        if isinstance(children, list):
+            sanitized["children"] = [
+                str(child)
+                for child in children
+                if isinstance(child, (str, int)) and str(child)
+            ]
+
+        ignored_keys = {
+            "revision_id",
+            "parent_id",
+            "wiki_token",
+        }
+        for key, value in block.items():
+            if key in ignored_keys or key in {"block_id", "block_type", "children"}:
+                continue
+            sanitized_value = cls._remove_readonly_fields(value)
+            if sanitized_value is not None:
+                sanitized[key] = sanitized_value
+
+        return sanitized
+
+    @classmethod
+    def _remove_readonly_fields(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            result: Dict[str, Any] = {}
+            for key, item in value.items():
+                if key == "merge_info" or item is None:
+                    continue
+                cleaned = cls._remove_readonly_fields(item)
+                if cleaned is not None:
+                    result[key] = cleaned
+            return result
+        if isinstance(value, list):
+            return [
+                cleaned
+                for item in value
+                if (cleaned := cls._remove_readonly_fields(item)) is not None
+            ]
+        return value
 
     @staticmethod
     def _extract_converted_blocks(data: Dict[str, Any]) -> List[Dict[str, Any]]:
         if not isinstance(data, dict):
             return []
 
+        first_level_block_ids = data.get("first_level_block_ids")
+        blocks_payload = data.get("blocks")
+        if isinstance(first_level_block_ids, list) and isinstance(blocks_payload, list):
+            blocks_by_id = {
+                str(item.get("block_id")): item
+                for item in blocks_payload
+                if isinstance(item, dict) and item.get("block_id")
+            }
+            ordered_blocks: List[Dict[str, Any]] = []
+            for block_id in first_level_block_ids:
+                block = blocks_by_id.get(str(block_id))
+                sanitized = FeishuDocsService._sanitize_converted_block(block)
+                if sanitized:
+                    ordered_blocks.append(sanitized)
+            if ordered_blocks:
+                return ordered_blocks
+
         for key in ("children", "blocks", "items"):
             value = data.get(key)
             if isinstance(value, list):
-                return [item for item in value if isinstance(item, dict)]
+                return [
+                    sanitized
+                    for item in value
+                    if (sanitized := FeishuDocsService._sanitize_converted_block(item))
+                ]
         return []
+
+    @staticmethod
+    def _sanitize_converted_block(block: Any) -> Optional[Dict[str, Any]]:
+        if not isinstance(block, dict):
+            return None
+
+        block_type = block.get("block_type")
+        if not isinstance(block_type, int):
+            return None
+
+        sanitized: Dict[str, Any] = {"block_type": block_type}
+        ignored_keys = {
+            "block_id",
+            "revision_id",
+            "parent_id",
+            "children",
+            "wiki_token",
+        }
+
+        for key, value in block.items():
+            if key in ignored_keys or key == "block_type" or value is None:
+                continue
+            if isinstance(value, (dict, list)):
+                sanitized[key] = value
+
+        return sanitized
 
     async def _clear_doc_children(self, token: str, doc_token: str) -> None:
         data = await self._request_json(

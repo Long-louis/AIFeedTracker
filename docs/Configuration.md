@@ -102,14 +102,41 @@ cp data/bilibili_creators.json.example data/bilibili_creators.json
 - 写入成功后，消息会附带知识库链接（优先用租户域名 wiki 链接）
 - 开通 `docx:document.block:convert` 后，Markdown 会转成带样式的文档块
 
-## 6) 常用运行命令
+## 6) 可选能力 C：创作者管理 Web 服务
+
+用途：提供一个受密码保护的本地管理界面，用于维护 `data/bilibili_creators.json`。
+
+它和主监控服务的关系：该页面修改创作者配置文件后，主服务会基于现有的热重载机制感知 `data/bilibili_creators.json` 变化并应用，无需重启主进程。
+
+环境变量：
+
+- `CREATOR_ADMIN_PASSWORD`
+- `CREATOR_ADMIN_SECRET_KEY`
+- `CREATOR_ADMIN_HOST`
+- `CREATOR_ADMIN_PORT`
+- `CREATOR_ADMIN_CREATORS_FILE`
+
+启动示例：
+
+- `uv run python main.py --mode creator-admin`
+
+安全与部署建议：
+
+- 默认建议仅本地监听（例如 `127.0.0.1`），不要直接暴露到公网
+- 对外访问请放在反向代理后（如 Nginx/Caddy），并配置 TLS 与访问控制
+
+并发写入说明：
+
+- `data/bilibili_creators.json` 采用单写者模型，任一时刻只应有一个写入端（该管理服务或人工编辑）
+
+## 7) 常用运行命令
 
 - 持续运行：`uv run python main.py --mode service`
 - 单次检查：`uv run python main.py --mode monitor --once`
 - 重置状态并单次检查：`uv run python main.py --mode monitor --reset --once`
 - 全量测试：`uv run python -m unittest discover -s tests -p "test_*.py" -q`
 
-## 7) 升级时要做的事
+## 8) 升级时要做的事
 
 每次升级后，请对照示例文件刷新本地配置：
 
@@ -117,7 +144,7 @@ cp data/bilibili_creators.json.example data/bilibili_creators.json
 - `data/feishu_channels.json.example`
 - `data/bilibili_creators.json.example`
 
-## 8) 二次开发建议阅读
+## 9) 二次开发建议阅读
 
 - 架构模式：`docs/architectural_patterns.md`
 - 文档索引：`docs/README.md`

@@ -10,10 +10,14 @@ services:
     environment:
       - ASR_MODEL=iic/SenseVoiceSmall
       - ASR_DEVICE=cuda
+      - ASR_MAX_UPLOAD_BYTES=209715200
+      - ASR_SEGMENT_TEMP_DIR=/home/app/.cache/segments
+      - ASR_UPLOAD_TEMP_DIR=/home/app/.cache/uploads
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
     volumes:
       - ../cache/modelscope:/home/app/.cache/modelscope
+      - ../cache/temp:/home/app/.cache
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8900/health', timeout=3).read()"]
       interval: 30s

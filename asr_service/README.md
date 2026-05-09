@@ -48,7 +48,7 @@ ASR_API_TIMEOUT_SECONDS=300
 
 ## 5) 常见运行参数
 
-- `ASR_MAX_UPLOAD_BYTES`：单次上传大小限制，默认 25 MiB
+- `ASR_MAX_UPLOAD_BYTES`：单次上传大小限制，默认 25 MiB。生产建议 >= 200 MiB（例如 `209715200`），避免 10 分钟级音频触发 `413 Request Entity Too Large`
 - `ASR_SEGMENT_SECONDS`：长音频分段秒数，默认 45
 
 这两个参数用于控制稳定性和内存占用。

@@ -1,4 +1,5 @@
 import asyncio
+import importlib
 import logging
 import os
 import re
@@ -28,8 +29,10 @@ APP_TITLE = "SenseVoice ASR Service"
 APP_VERSION = "0.1.0"
 MODEL_ID = os.getenv("ASR_MODEL", "iic/SenseVoiceSmall")
 MODEL_DEVICE = os.getenv("ASR_DEVICE", "cuda")
-DEFAULT_MAX_UPLOAD_BYTES = 25 * 1024 * 1024
-DEFAULT_SEGMENT_SECONDS = 45
+DEFAULT_MAX_UPLOAD_BYTES = 200 * 1024 * 1024
+DEFAULT_SEGMENT_SECONDS = 20
+DEFAULT_SEGMENT_TEMP_DIR = "/home/app/.cache/segments"
+DEFAULT_UPLOAD_TEMP_DIR = "/home/app/.cache/uploads"
 
 
 def _get_max_upload_bytes() -> int:
@@ -62,6 +65,22 @@ def _get_segment_seconds() -> int:
 
 
 SEGMENT_SECONDS = _get_segment_seconds()
+
+
+def _get_segment_temp_dir() -> str:
+    raw_value = os.getenv("ASR_SEGMENT_TEMP_DIR", DEFAULT_SEGMENT_TEMP_DIR).strip()
+    return raw_value or DEFAULT_SEGMENT_TEMP_DIR
+
+
+SEGMENT_TEMP_DIR = _get_segment_temp_dir()
+
+
+def _get_upload_temp_dir() -> str:
+    raw_value = os.getenv("ASR_UPLOAD_TEMP_DIR", DEFAULT_UPLOAD_TEMP_DIR).strip()
+    return raw_value or DEFAULT_UPLOAD_TEMP_DIR
+
+
+UPLOAD_TEMP_DIR = _get_upload_temp_dir()
 
 
 def _is_allowed_content_type(content_type: str | None) -> bool:
@@ -117,6 +136,8 @@ class ASRRuntime:
         *,
         language: str | None = None,
         timestamps: bool | None = None,
+        use_vad: bool = False,
+        max_single_segment_ms: int | None = None,
     ) -> dict[str, Any]:
         await self.ensure_loaded()
         assert self.model is not None
@@ -126,6 +147,13 @@ class ASRRuntime:
             generate_kwargs["language"] = language
         if timestamps is not None:
             generate_kwargs["timestamps"] = timestamps
+        if use_vad:
+            generate_kwargs["vad_model"] = "fsmn-vad"
+            generate_kwargs["merge_vad"] = True
+            if max_single_segment_ms and max_single_segment_ms > 0:
+                generate_kwargs["vad_kwargs"] = {
+                    "max_single_segment_time": max_single_segment_ms
+                }
 
         def _generate() -> Any:
             return self.model.generate(input=audio_path, **generate_kwargs)
@@ -174,7 +202,10 @@ async def transcribe(
     temp_path = None
     bytes_written = 0
     try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        os.makedirs(UPLOAD_TEMP_DIR, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            delete=False, suffix=suffix, dir=UPLOAD_TEMP_DIR
+        ) as tmp:
             temp_path = tmp.name
             while True:
                 chunk = await file.read(1024 * 1024)
@@ -192,7 +223,7 @@ async def transcribe(
             raise HTTPException(status_code=400, detail="Uploaded audio file is empty")
 
         start_time = time.perf_counter()
-        result = await _transcribe_with_chunking(
+        result = await _transcribe_with_vad_fallback(
             temp_path,
             language=language,
             timestamps=timestamps,
@@ -226,6 +257,34 @@ async def transcribe(
                 os.remove(temp_path)
             except OSError:
                 LOGGER.warning("Failed to remove temp file: %s", temp_path)
+
+
+async def _transcribe_with_vad_fallback(
+    audio_path: str,
+    *,
+    language: str | None,
+    timestamps: bool | None,
+) -> dict[str, Any]:
+    try:
+        return await runtime.transcribe(
+            audio_path,
+            language=language,
+            timestamps=timestamps,
+            use_vad=True,
+            max_single_segment_ms=SEGMENT_SECONDS * 1000,
+        )
+    except Exception as exc:
+        if not _should_fallback_to_chunking(exc):
+            raise
+        _clear_cuda_cache()
+        LOGGER.warning(
+            "VAD transcription failed, fallback to manual chunking: %s", exc
+        )
+        return await _transcribe_with_resilient_chunking(
+            audio_path,
+            language=language,
+            timestamps=timestamps,
+        )
 
 
 def _normalize_result(result: Any) -> dict[str, Any]:
@@ -274,15 +333,16 @@ async def _transcribe_with_chunking(
     *,
     language: str | None,
     timestamps: bool | None,
+    segment_seconds: int,
 ) -> dict[str, Any]:
     segment_paths: list[str] = []
     segment_dir: str | None = None
     try:
         duration_seconds = _probe_duration_seconds(audio_path)
-        if duration_seconds > SEGMENT_SECONDS:
+        if duration_seconds > segment_seconds:
             segment_dir, segment_paths = _split_audio_segments(
                 audio_path,
-                segment_seconds=SEGMENT_SECONDS,
+                segment_seconds=segment_seconds,
             )
         else:
             segment_paths = [audio_path]
@@ -296,6 +356,7 @@ async def _transcribe_with_chunking(
                     segment_path,
                     language=language,
                     timestamps=timestamps,
+                    use_vad=False,
                 )
             except Exception as exc:
                 if _is_empty_waveform_error(exc):
@@ -321,6 +382,7 @@ async def _transcribe_with_chunking(
                             "text": seg.get("text") or "",
                         }
                     )
+            _clear_cuda_cache()
             segment_index += 1
 
         return {
@@ -330,6 +392,36 @@ async def _transcribe_with_chunking(
     finally:
         if segment_dir and os.path.isdir(segment_dir):
             shutil.rmtree(segment_dir, ignore_errors=True)
+
+
+async def _transcribe_with_resilient_chunking(
+    audio_path: str,
+    *,
+    language: str | None,
+    timestamps: bool | None,
+) -> dict[str, Any]:
+    last_exc: Exception | None = None
+    for segment_seconds in (SEGMENT_SECONDS, 10, 5):
+        try:
+            return await _transcribe_with_chunking(
+                audio_path,
+                language=language,
+                timestamps=timestamps,
+                segment_seconds=segment_seconds,
+            )
+        except Exception as exc:
+            last_exc = exc
+            if not _is_oom_error(exc):
+                raise
+            _clear_cuda_cache()
+            LOGGER.warning(
+                "Chunked transcription OOM at %ss, retrying with smaller segments: %s",
+                segment_seconds,
+                exc,
+            )
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("Chunked transcription failed without an error")
 
 
 def _probe_duration_seconds(audio_path: str) -> int:
@@ -377,7 +469,10 @@ def _probe_duration_seconds_float(audio_path: str) -> float:
 def _split_audio_segments(
     audio_path: str, segment_seconds: int
 ) -> tuple[str, list[str]]:
-    segment_dir = tempfile.mkdtemp(prefix="sensevoice-segments-")
+    os.makedirs(SEGMENT_TEMP_DIR, exist_ok=True)
+    segment_dir = tempfile.mkdtemp(
+        prefix="sensevoice-segments-", dir=SEGMENT_TEMP_DIR
+    )
     segment_paths: list[str] = []
     segment_index = 0
     start_seconds = 0
@@ -446,3 +541,58 @@ def _offset_number(value: Any, offset_ms: int) -> Any:
 def _is_empty_waveform_error(exc: Exception) -> bool:
     message = str(exc)
     return "choose a window size" in message and "[2, 0]" in message
+
+
+def _is_oom_error(exc: Exception) -> bool:
+    return "out of memory" in str(exc).lower()
+
+
+def _should_fallback_to_chunking(exc: Exception) -> bool:
+    message = str(exc).lower()
+    fallback_markers = (
+        "out of memory",
+        "cuda out of memory",
+        "vad_model",
+        "vad_kwargs",
+        "max_single_segment_time",
+        "unexpected keyword",
+    )
+    return any(marker in message for marker in fallback_markers)
+
+
+def _clear_cuda_cache() -> None:
+    """Enhanced CUDA cache clearing with GC and monitoring."""
+    import gc
+    
+    try:
+        torch_module = importlib.import_module("torch")
+    except Exception:
+        return
+
+    cuda = getattr(torch_module, "cuda", None)
+    if cuda is None or not getattr(cuda, "is_available", lambda: False)():
+        return
+
+    try:
+        allocated_before = cuda.memory_allocated() / 1024**3
+        reserved_before = cuda.memory_reserved() / 1024**3
+        
+        gc.collect()
+        
+        import time
+        time.sleep(0.1)
+        
+        cuda.empty_cache()
+        cuda.reset_peak_memory_stats()
+        
+        allocated_after = cuda.memory_allocated() / 1024**3
+        reserved_after = cuda.memory_reserved() / 1024**3
+        
+        LOGGER.info(
+            "CUDA cache cleared: %.2fGB->%.2fGB allocated, %.2fGB->%.2fGB reserved",
+            allocated_before, allocated_after,
+            reserved_before, reserved_after
+        )
+        
+    except Exception:
+        LOGGER.warning("Failed to clear CUDA cache", exc_info=True)

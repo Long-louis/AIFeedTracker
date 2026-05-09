@@ -21,7 +21,15 @@ RUN groupadd --system app && useradd --system --gid app --create-home app
 
 COPY requirements.txt ./
 RUN python -m pip install --no-cache-dir --upgrade pip && \
-    python -m pip install --no-cache-dir -r requirements.txt
+    python -m pip install --no-cache-dir -r requirements.txt && \
+    python - <<'PY'
+import fastapi
+import funasr
+import modelscope
+import torch
+import torchaudio
+print('dependency check ok')
+PY
 
 COPY main.py ./main.py
 

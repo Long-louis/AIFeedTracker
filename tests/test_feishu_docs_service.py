@@ -183,15 +183,95 @@ class TestFeishuDocsBlockConversion(unittest.TestCase):
         self.assertNotIn("parent_id", blocks[0])
         self.assertNotIn("children", blocks[0])
 
-    def test_markdown_to_text_blocks_keeps_non_empty_lines(self):
-        blocks = FeishuDocsService._markdown_to_text_blocks(
-            "## 关键信息和观点\n- 要点A\n\n## 时间线总结\n- 00:00 开场"
+    def test_extract_descendant_payload_orders_blocks_by_document_tree(self):
+        payload = FeishuDocsService._extract_convert_descendant_payload(
+            {
+                "first_level_block_ids": ["h1", "list1"],
+                "blocks": [
+                    {
+                        "block_id": "li2",
+                        "parent_id": "list1",
+                        "children": [],
+                        "block_type": 12,
+                        "bullet": {"elements": [{"text_run": {"content": "第二项"}}]},
+                    },
+                    {
+                        "block_id": "h1",
+                        "parent_id": "",
+                        "children": [],
+                        "block_type": 3,
+                        "heading1": {"elements": [{"text_run": {"content": "标题"}}]},
+                    },
+                    {
+                        "block_id": "li1",
+                        "parent_id": "list1",
+                        "children": [],
+                        "block_type": 12,
+                        "bullet": {"elements": [{"text_run": {"content": "第一项"}}]},
+                    },
+                    {
+                        "block_id": "list1",
+                        "parent_id": "",
+                        "children": ["li1", "li2"],
+                        "block_type": 12,
+                        "bullet": {"elements": [{"text_run": {"content": "列表"}}]},
+                    },
+                ],
+            }
         )
-        self.assertEqual(len(blocks), 4)
+
+        self.assertIsNotNone(payload)
+        self.assertEqual(payload["children_id"], ["h1", "list1"])
         self.assertEqual(
-            blocks[0]["text"]["elements"][0]["text_run"]["content"],
-            "## 关键信息和观点",
+            [block["block_id"] for block in payload["descendants"]],
+            ["h1", "list1", "li1", "li2"],
         )
+
+    def test_extract_descendant_payload_preserves_string_child_relationship(self):
+        payload = FeishuDocsService._extract_convert_descendant_payload(
+            {
+                "first_level_block_ids": ["parent"],
+                "blocks": [
+                    {
+                        "block_id": "parent",
+                        "children": "child",
+                        "block_type": 12,
+                        "bullet": {"elements": [{"text_run": {"content": "父级"}}]},
+                    },
+                    {
+                        "block_id": "child",
+                        "children": [],
+                        "block_type": 12,
+                        "bullet": {"elements": [{"text_run": {"content": "子级"}}]},
+                    },
+                ],
+            }
+        )
+
+        self.assertIsNotNone(payload)
+        self.assertEqual(payload["descendants"][0]["children"], ["child"])
+        self.assertEqual(
+            [block["block_id"] for block in payload["descendants"]],
+            ["parent", "child"],
+        )
+
+    def test_markdown_to_text_blocks_converts_basic_markdown_formatting(self):
+        blocks = FeishuDocsService._markdown_to_text_blocks(
+            "## 关键信息和观点\n- **要点A**：内容"
+        )
+        self.assertEqual(len(blocks), 2)
+        self.assertEqual(blocks[0]["block_type"], 4)
+        self.assertEqual(
+            blocks[0]["heading2"]["elements"][0]["text_run"]["content"],
+            "关键信息和观点",
+        )
+        elements = blocks[1]["text"]["elements"]
+        self.assertEqual(elements[0]["text_run"]["content"], "• ")
+        self.assertEqual(elements[1]["text_run"]["content"], "要点A")
+        self.assertTrue(
+            elements[1]["text_run"]["text_element_style"]["bold"]
+        )
+        self.assertNotIn("**", "".join(e["text_run"]["content"] for e in elements))
 
     def test_markdown_to_text_blocks_handles_empty_text(self):
         blocks = FeishuDocsService._markdown_to_text_blocks("   \n\n")
@@ -251,9 +331,10 @@ class TestFeishuDocsMarkdownConvert(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(write_payload["mode"], "children")
             blocks = write_payload["children"]
             self.assertEqual(len(blocks), 2)
+            self.assertEqual(blocks[0]["block_type"], 4)
             self.assertEqual(
-                blocks[0]["text"]["elements"][0]["text_run"]["content"],
-                "## 关键信息和观点",
+                blocks[0]["heading2"]["elements"][0]["text_run"]["content"],
+                "关键信息和观点",
             )
 
 
@@ -404,7 +485,8 @@ class TestFeishuDocsReplaceContent(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(descendant_calls, 1)
             self.assertEqual(len(children_calls), 1)
-            self.assertEqual(len(children_calls[0]["children"]), 2)
+            self.assertEqual(len(children_calls[0]["children"]), 4)
+            self.assertEqual(children_calls[0]["children"][0]["block_type"], 4)
 
     async def test_replace_doc_content_sends_children_in_batches_of_50(self):
         with tempfile.TemporaryDirectory() as tmpdir:

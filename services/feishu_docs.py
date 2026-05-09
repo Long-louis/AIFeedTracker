@@ -385,25 +385,43 @@ class FeishuDocsService:
         ):
             return None
 
-        descendants: List[Dict[str, Any]] = []
-        valid_block_ids = set()
+        blocks_by_id: Dict[str, Dict[str, Any]] = {}
         for block in blocks_payload:
             sanitized = cls._sanitize_descendant_block(block)
             if not sanitized:
                 continue
-            descendants.append(sanitized)
-            valid_block_ids.add(sanitized["block_id"])
+            blocks_by_id[sanitized["block_id"]] = sanitized
 
-        if not descendants:
+        if not blocks_by_id:
             return None
 
         children_id = [
             str(block_id)
             for block_id in first_level_block_ids
-            if str(block_id) in valid_block_ids
+            if str(block_id) in blocks_by_id
         ]
         if not children_id:
             return None
+
+        descendants: List[Dict[str, Any]] = []
+        visited = set()
+
+        def append_subtree(block_id: str) -> None:
+            if block_id in visited:
+                return
+            block = blocks_by_id.get(block_id)
+            if not block:
+                return
+            visited.add(block_id)
+            descendants.append(block)
+            for child_id in block.get("children") or []:
+                append_subtree(str(child_id))
+
+        for block_id in children_id:
+            append_subtree(block_id)
+
+        for block_id in blocks_by_id:
+            append_subtree(block_id)
 
         return {
             "children_id": children_id,
@@ -433,6 +451,8 @@ class FeishuDocsService:
                 for child in children
                 if isinstance(child, (str, int)) and str(child)
             ]
+        elif isinstance(children, (str, int)) and str(children):
+            sanitized["children"] = [str(children)]
 
         ignored_keys = {
             "revision_id",
@@ -550,21 +570,82 @@ class FeishuDocsService:
 
         blocks: List[Dict[str, Any]] = []
         for line in lines:
+            heading_match = re.match(r"^(#{1,6})\s+(.+)$", line)
+            if heading_match:
+                level = min(len(heading_match.group(1)), 3)
+                blocks.append(
+                    {
+                        "block_type": 2 + level,
+                        f"heading{level}": {
+                            "elements": FeishuDocsService._markdown_inline_elements(
+                                heading_match.group(2)
+                            )
+                        },
+                    }
+                )
+                continue
+
+            bullet_match = re.match(r"^[-*+]\s+(.+)$", line)
+            if bullet_match:
+                content = bullet_match.group(1)
+                elements = [
+                    {
+                        "text_run": {
+                            "content": "• ",
+                        }
+                    }
+                ]
+                elements.extend(FeishuDocsService._markdown_inline_elements(content))
+            else:
+                elements = FeishuDocsService._markdown_inline_elements(line)
+
             blocks.append(
                 {
                     "block_type": 2,
                     "text": {
-                        "elements": [
-                            {
-                                "text_run": {
-                                    "content": line,
-                                }
-                            }
-                        ]
+                        "elements": elements
                     },
                 }
             )
         return blocks
+
+    @staticmethod
+    def _markdown_inline_elements(text: str) -> List[Dict[str, Any]]:
+        elements: List[Dict[str, Any]] = []
+        position = 0
+        for match in re.finditer(r"\*\*(.+?)\*\*", text or ""):
+            if match.start() > position:
+                elements.append(
+                    {
+                        "text_run": {
+                            "content": text[position : match.start()],
+                        }
+                    }
+                )
+            elements.append(
+                {
+                    "text_run": {
+                        "content": match.group(1),
+                        "text_element_style": {
+                            "bold": True,
+                        },
+                    }
+                }
+            )
+            position = match.end()
+
+        if position < len(text):
+            elements.append(
+                {
+                    "text_run": {
+                        "content": text[position:],
+                    }
+                }
+            )
+
+        if not elements:
+            elements.append({"text_run": {"content": ""}})
+        return elements
 
     async def _ensure_root_node(self, token: str) -> str:
         if self.root_node_token:

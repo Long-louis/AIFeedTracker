@@ -11,6 +11,7 @@ import logging
 import os
 import random
 import time
+from pathlib import Path
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -386,21 +387,29 @@ class MonitorService:
         if not self.feishu_bot:
             return
 
-        if not self.auth.has_active_qr_login():
-            qr_path = await self.auth.start_qr_login()
-        else:
-            qr_path = str(self.auth.QR_CODE_PATH)
+        qr_path = None
+        try:
+            if not self.auth.has_active_qr_login():
+                qr_path = await self.auth.start_qr_login()
+            else:
+                qr_path = str(self.auth.QR_CODE_PATH)
+        except Exception as e:
+            self.logger.error(f"生成二维码失败: {e}")
 
-        image_key = await self.feishu_bot.upload_local_image(qr_path)
+        image_key = None
+        if qr_path and Path(qr_path).exists():
+            image_key = await self.feishu_bot.upload_local_image(qr_path)
 
         content = "检测到B站登录已失效，需要扫码重新登录。"
         if reason:
             content += f"\n\n**原因**: {reason}"
         if image_key:
             content += f"\n\n![B站登录二维码]({image_key})"
-        else:
+        elif qr_path:
             content += f"\n\n二维码文件: {qr_path}"
             content += "\n\n⚠️ 未配置飞书应用凭证，无法上传图片。"
+        else:
+            content += "\n\n⚠️ 二维码生成失败，请手动重新登录。"
 
         await self.feishu_bot.send_system_notification(
             self.feishu_bot.LEVEL_WARNING,
@@ -418,9 +427,12 @@ class MonitorService:
         if not force and now_ts - last_notify < self._QR_NOTIFY_INTERVAL:
             return
 
-        await self._dispatch_qr_login_notification(reason)
-        self.auth.clear_qr_pending_notify_reason()
-        self.auth.set_qr_last_notify_ts(now_ts)
+        try:
+            await self._dispatch_qr_login_notification(reason)
+        finally:
+            # 无论通知是否成功，都要清除 pending_reason，避免无限重试
+            self.auth.clear_qr_pending_notify_reason()
+            self.auth.set_qr_last_notify_ts(now_ts)
 
     async def _poll_qr_login_status(self) -> None:
         pending_reason = self.auth.get_qr_pending_notify_reason()
@@ -436,7 +448,7 @@ class MonitorService:
             return
 
         if state == "timeout":
-            await self._notify_qr_login_needed("二维码已过期，请重新扫码", force=True)
+            self.logger.info("二维码登录已超时，状态已清理")
             return
 
         if state == "done" and values:

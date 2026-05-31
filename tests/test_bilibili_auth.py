@@ -11,8 +11,10 @@ from services.bilibili_auth import BilibiliAuth
 
 
 class _FakePicture:
+    content = b"fake-qr-image-bytes"
+
     def to_file(self, path):
-        Path(path).write_text("fake-qr", encoding="utf-8")
+        Path(path).write_bytes(self.content)
 
 
 class _FakeQrCodeLogin:

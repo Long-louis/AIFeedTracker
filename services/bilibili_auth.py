@@ -387,10 +387,13 @@ class BilibiliAuth:
         finally:
             login_v2.tempfile.tempdir = original_tempdir
 
-        self._qr_login.get_qrcode_picture().to_file(str(self.QR_CODE_PATH))
-        generated_qrcode = temp_dir / "qrcode.png"
-        if generated_qrcode.exists():
-            generated_qrcode.unlink()
+        # 直接写入原始图片字节，绕过 Picture.to_file() 的 bug：
+        # 该方法内部会 open(/tmp/test.png, "wb") 作为中间文件，
+        # 当 /tmp/test.png 被其他用户创建后，sticky bit 下 O_CREAT 会 EACCES。
+        picture = self._qr_login.get_qrcode_picture()
+        with open(str(self.QR_CODE_PATH), "wb") as f:
+            f.write(picture.content)
+
         self.auth_data["qr_login_ts"] = time.time()
         self._save_auth_data()
         return str(self.QR_CODE_PATH)

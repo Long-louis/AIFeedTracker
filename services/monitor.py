@@ -1720,18 +1720,15 @@ class MonitorService:
             else:
                 unseen_mids.add(mid)
 
-        # 关注列表校验：关注的 UID 是否都出现在聚合流里
+        # 关注列表校验：未出现在本轮聚合流的关注博主。
+        # 注意：未出现通常只是"本期无动态"，属正常现象，不发飞书告警，避免刷屏。
+        # 真正的"未关注"问题应靠启动期校验或长期统计判断，而非每轮。
         missing = set(uid_to_creator) - set(grouped)
-        if missing and self.feishu_bot:
-            try:
-                names = ", ".join(uid_to_creator[m].name for m in missing)
-                await self.feishu_bot.send_system_notification(
-                    self.feishu_bot.LEVEL_WARNING,
-                    "关注列表校验",
-                    f"以下博主在本轮聚合流未出现（可能未在账号关注列表，或本期无动态）：\n{names}",
-                )
-            except Exception:
-                pass
+        if missing:
+            self.logger.debug(
+                "本轮聚合流未出现（通常为本期无动态）：%s",
+                ", ".join(uid_to_creator[m].name for m in missing),
+            )
 
         self.logger.info(
             f"聚合流过滤：命中 {len(grouped)}/{len(uid_to_creator)} 个关注博主，"

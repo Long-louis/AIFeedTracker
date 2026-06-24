@@ -115,31 +115,22 @@ async def fetch_aggregated_feed(self, offset: Optional[str] = None) -> Dict[str,
 
 **维度一：时间窗口 → 决定轮询周期**
 
+聚合流是单轮询器，无法给单个博主更低延迟，因此轮询周期**纯按时间窗口控制**
+（不再依赖 per-creator `latency_tier`）：
+
 | 窗口 | 含义 | 周期 |
 |---|---|---|
-| 盘中（活跃） | 交易日 09:15–15:00，且存在 realtime 博主 | `FEED_POLL_FAST_SECONDS`（默认 90s） |
+| 盘中（活跃） | 交易日 09:15–15:00 | `FEED_POLL_FAST_SECONDS`（默认 90s） |
 | 收盘后/日间 | 非盘中但非深夜 | `FEED_POLL_NORMAL_SECONDS`（默认 600s） |
 | 深夜 | 凌晨等 | `FEED_POLL_QUIET_SECONDS`（默认 3600s） |
 
-因为聚合流每轮只有 1 次调用，周期成本与博主数无关，分层主要用于在"需要近实时"时
-加快节奏、其余时间放宽。
+> 每个周期还会叠加随机抖动（`FEED_POLL_JITTER_PCT`，默认 ±25%），
+> 避免固定周期成为风控指纹。
 
-**维度二：创作者 tier → 决定派发与总结时机**
+**维度二：创作者 tier（保留字段，主要用于总结时机）**
 
-Creator 新增字段：
-
-- `latency_tier`: `"realtime"`（盘中近实时派发）/ `"normal"`（默认）。
-- `summarize_mode`: `"immediate"`（检测到即总结，默认）/ `"deferred"`（延迟到批量队列）。
-
-派发规则：
-
-- realtime 博主：每次快周期命中即立即派发 + 立即总结（如视频）。
-- normal 博主：检测到新动态即发通知（成本低）；若为视频且
-  `summarize_mode="deferred"`，则 AI 总结进入**按小时批量队列**
-  （cron `FEED_SUMMARY_BATCH_CRON`，默认 `0 * * * *`），避免高峰期 ASR/LLM 拥堵。
-  —— 这正是"每天下午 3 点之后的复盘/总结视频每小时再处理"的落地方式。
-
-> 去重安全：快/慢周期谁先看到某条新动态，per-uid `last_seen` 都会防止重复派发。
+- `latency_tier`：保留字段，聚合模式下不再影响轮询频率（频率由时间窗口决定）。
+- `summarize_mode`: `"immediate"`（检测到即总结，默认）/ `"deferred"`（进入按小时批量队列）。
 
 新增周期控制器：
 

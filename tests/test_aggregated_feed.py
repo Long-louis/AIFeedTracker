@@ -80,34 +80,32 @@ class TestComputePollInterval(unittest.IsolatedAsyncioTestCase):
             "poll_fast_seconds": 90,
             "poll_normal_seconds": 600,
             "poll_quiet_seconds": 3600,
+            "poll_jitter_ratio": 0.25,
             "quiet_hours_start": 0,
             "quiet_hours_end": 6,
         }
         self.svc.logger = __import__("logging").getLogger("test")
 
-    def _now(self, dt):
-        return dt
-
-    def test_fast_when_session_and_realtime(self):
+    def test_fast_when_in_session_regardless_of_tier(self):
         tz = ZoneInfo("Asia/Shanghai")
         with patch.object(self.svc, "_tz", lambda: tz):
-            creators = [Creator(uid=1, name="a", latency_tier="realtime")]
-            # 周二 10:00
-            with patch(
-                "services.monitor.datetime",
-                wraps=datetime,
-            ) as mock_dt:
-                mock_dt.now.return_value = datetime(2026, 6, 23, 10, 0, tzinfo=tz)
-                interval = self.svc.compute_poll_interval(creators)
-        self.assertEqual(interval, 90)
+            # 盘口内：无论是否 realtime 都走快周期
+            for tier in ("normal", "realtime"):
+                creators = [Creator(uid=1, name="a", latency_tier=tier)]
+                with patch("services.monitor.datetime", wraps=datetime) as mock_dt:
+                    mock_dt.now.return_value = datetime(
+                        2026, 6, 23, 10, 0, tzinfo=tz
+                    )
+                    interval = self.svc.compute_poll_interval(creators)
+                self.assertEqual(interval, 90, f"tier={tier} 应为快周期")
 
-    def test_normal_when_no_realtime(self):
+    def test_normal_outside_session(self):
         tz = ZoneInfo("Asia/Shanghai")
-        creators = [Creator(uid=1, name="a", latency_tier="normal")]
+        creators = [Creator(uid=1, name="a", latency_tier="realtime")]
         with patch.object(self.svc, "_tz", lambda: tz):
             with patch("services.monitor.datetime", wraps=datetime) as mock_dt:
-                # 周二 10:00 但无 realtime 博主 -> normal
-                mock_dt.now.return_value = datetime(2026, 6, 23, 10, 0, tzinfo=tz)
+                # 周二 16:00，盘外 -> normal
+                mock_dt.now.return_value = datetime(2026, 6, 23, 16, 0, tzinfo=tz)
                 interval = self.svc.compute_poll_interval(creators)
         self.assertEqual(interval, 600)
 
@@ -116,10 +114,17 @@ class TestComputePollInterval(unittest.IsolatedAsyncioTestCase):
         creators = [Creator(uid=1, name="a", latency_tier="realtime")]
         with patch.object(self.svc, "_tz", lambda: tz):
             with patch("services.monitor.datetime", wraps=datetime) as mock_dt:
-                # 周二 03:00（静默时段），即便有 realtime -> quiet
+                # 周二 03:00（静默时段）-> quiet
                 mock_dt.now.return_value = datetime(2026, 6, 23, 3, 0, tzinfo=tz)
                 interval = self.svc.compute_poll_interval(creators)
         self.assertEqual(interval, 3600)
+
+    def test_jittered_interval_within_bounds(self):
+        base = 100
+        for _ in range(50):
+            v = self.svc._jittered_interval(base)
+            self.assertGreaterEqual(v, 75.0)
+            self.assertLessEqual(v, 125.0)
 
 
 class TestAggregatedDispatch(unittest.IsolatedAsyncioTestCase):

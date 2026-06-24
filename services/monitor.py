@@ -1838,13 +1838,26 @@ class MonitorService:
         return hour >= start or hour < end
 
     def compute_poll_interval(self, creators: List[Creator]) -> int:
-        """根据会话窗口与是否存在 realtime 博主，决定本轮轮询周期（秒）。"""
+        """根据会话窗口决定本轮轮询周期（秒），纯时间窗口控制。
+
+        聚合流为单轮询器，无法给单个博主更低延迟，故不再依赖 per-creator realtime。
+        盘口窗口内走快周期，深夜走静默周期，其余正常周期。
+        """
         now = datetime.now(self._tz())
-        if self._in_market_session(now) and self._has_realtime_creator(creators):
+        if self._in_market_session(now):
             return int(self.feed_config.get("poll_fast_seconds", 90))
         if self._is_quiet_hours(now):
             return int(self.feed_config.get("poll_quiet_seconds", 3600))
         return int(self.feed_config.get("poll_normal_seconds", 600))
+
+    def _jittered_interval(self, base: int) -> float:
+        """给轮询间隔加随机抖动（±25%），避免固定周期成为风控指纹。"""
+        jitter_ratio = float(
+            self.feed_config.get("poll_jitter_ratio", 0.25)
+        )
+        low = base * (1 - jitter_ratio)
+        high = base * (1 + jitter_ratio)
+        return random.uniform(low, high)
 
     def _tz(self):
         from zoneinfo import ZoneInfo
@@ -2494,8 +2507,11 @@ class MonitorService:
                     self.logger.error(
                         f"聚合流轮询异常: {e}", exc_info=True
                     )
-                interval = self.compute_poll_interval(holder["creators"])
-                self.logger.debug(f"聚合流下一轮 {interval}s 后执行")
+                base = self.compute_poll_interval(holder["creators"])
+                interval = self._jittered_interval(base)
+                self.logger.debug(
+                    f"聚合流下一轮 {interval:.0f}s 后执行（基准 {base}s，已加抖动）"
+                )
                 await asyncio.sleep(interval)
 
         async def _check_config_changes() -> None:

@@ -147,6 +147,7 @@ def load_feed_config() -> dict:
         "poll_fast_seconds": _get_env_int("FEED_POLL_FAST_SECONDS", 90),
         "poll_normal_seconds": _get_env_int("FEED_POLL_NORMAL_SECONDS", 600),
         "poll_quiet_seconds": _get_env_int("FEED_POLL_QUIET_SECONDS", 3600),
+        "poll_jitter_ratio": _get_env_int("FEED_POLL_JITTER_PCT", 25) / 100.0,
         "market_session_enabled": _get_env_bool("MARKET_SESSION_ENABLED", True),
         # 盘中窗口，如 "mon-fri 09:15-15:00"
         "market_session_windows": _get_env_str(

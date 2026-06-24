@@ -139,8 +139,30 @@ AI_CONFIG = {
     "token_encoding": os.getenv("AI_TOKEN_ENCODING", "cl100k_base"),
 }
 
+def load_feed_config() -> dict:
+    """监控聚合流与分层延迟配置（档位 A + C）。"""
+    return {
+        # aggregated=聚合流（每轮 1 次调用拉全部关注）；legacy=逐博主轮询（旧逻辑）
+        "mode": _get_env_str("FEED_MODE", "aggregated"),
+        "poll_fast_seconds": _get_env_int("FEED_POLL_FAST_SECONDS", 90),
+        "poll_normal_seconds": _get_env_int("FEED_POLL_NORMAL_SECONDS", 600),
+        "poll_quiet_seconds": _get_env_int("FEED_POLL_QUIET_SECONDS", 3600),
+        "market_session_enabled": _get_env_bool("MARKET_SESSION_ENABLED", True),
+        # 盘中窗口，如 "mon-fri 09:15-15:00"
+        "market_session_windows": _get_env_str(
+            "MARKET_SESSION_WINDOWS", "mon-fri 09:15-15:00"
+        ),
+        # 延迟总结批量队列 cron（仅 summarize_mode=deferred 的视频走此队列）
+        "summary_batch_cron": _get_env_str("FEED_SUMMARY_BATCH_CRON", "0 * * * *"),
+        # 深夜时段（24h 制，quiet 周期生效）
+        "quiet_hours_start": _get_env_int("QUIET_HOURS_START", 0),
+        "quiet_hours_end": _get_env_int("QUIET_HOURS_END", 6),
+    }
+
+
 LOCAL_ASR_CONFIG = load_local_asr_config()
 FEISHU_DOCS_CONFIG = load_feishu_docs_config()
+FEED_CONFIG = load_feed_config()
 
 # 反爬虫配置
 ANTI_BAN_CONFIG = {

@@ -4,11 +4,22 @@
     "name": "示例UP主",
     "platform": "bilibili",
     "enable_comments": false,
+    "feishu_channel": "webhook:default",
+    "_feed_mode说明": "默认走 FEED_MODE=aggregated 聚合流（一次请求拉全部关注），下列 crons/check_interval 仅在 FEED_MODE=legacy 时生效",
     "crons": [
       "*/3 9-14 * * *",
       "*/10 0-8,15-23 * * *"
     ],
-    "jitter_seconds": 60,
-    "feishu_channel": "webhook:default"
+    "jitter_seconds": 60
+  },
+  {
+    "uid": 654321,
+    "name": "实时股票操作博主",
+    "platform": "bilibili",
+    "feishu_channel": "app:default",
+    "_latency_tier说明": "realtime=盘中近实时派发（需配合 MARKET_SESSION_WINDOWS）；normal=普通周期",
+    "latency_tier": "realtime",
+    "_summarize_mode说明": "immediate=检测到即总结（默认）；deferred=进入按小时批量队列（适合复盘/总结类）",
+    "summarize_mode": "immediate"
   }
 ]

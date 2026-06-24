@@ -21,9 +21,14 @@ from apscheduler.triggers.cron import CronTrigger
 from bilibili_api import user
 from bilibili_api.comment import CommentResourceType
 
-from config import build_bilibili_credential
+from config import build_bilibili_credential, FEED_CONFIG
 
 from .bilibili_auth import BilibiliAuth
+from .bilibili_rate_limiter import (
+    BilibiliRateLimiter,
+    CircuitOpenError,
+    build_rate_limiter_from_env,
+)
 from .comment_fetcher import CommentFetcher
 from .feishu_docs import FeishuDocsService
 
@@ -125,6 +130,11 @@ class Creator:
     # 可选：每次触发后增加随机延迟（秒），用于错峰与降低风控
     jitter_seconds: int = 0
 
+    # 盘中分层延迟：realtime=盘中近实时派发；normal=普通周期（默认）
+    latency_tier: str = "normal"
+    # 视频总结时机：immediate=检测到即总结；deferred=进入按小时批量队列
+    summarize_mode: str = "immediate"
+
     def __post_init__(self):
         """初始化默认值"""
         if self.comment_rules is None:
@@ -210,6 +220,50 @@ class JsonState:
         entry["comment_poll_videos"] = video_map
 
 
+_WEEKDAY_RANGES = {
+    "mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6,
+}
+
+
+def _parse_dow_token(token: str) -> List[int]:
+    """解析星期段，如 'mon-fri' -> [0,1,2,3,4]，'sat,sun' -> [5,6]。"""
+    token = token.strip().lower()
+    if "-" in token:
+        a, b = token.split("-", 1)
+        a, b = _WEEKDAY_RANGES.get(a.strip(), 0), _WEEKDAY_RANGES.get(b.strip(), 6)
+        if a <= b:
+            return list(range(a, b + 1))
+        return list(range(a, 7)) + list(range(0, b + 1))
+    out = []
+    for part in token.split(","):
+        part = part.strip()
+        if part in _WEEKDAY_RANGES:
+            out.append(_WEEKDAY_RANGES[part])
+    return out
+
+
+def _match_session_window(spec: str, now: datetime) -> bool:
+    """判断 now 是否落在会话窗口内。spec 形如 'mon-fri 09:15-15:00'。"""
+    spec = (spec or "").strip().lower()
+    if not spec:
+        return False
+    parts = spec.split()
+    if len(parts) != 2:
+        return False
+    dow_part, time_part = parts
+    allowed_dows = set(_parse_dow_token(dow_part))
+    if now.weekday() not in allowed_dows:
+        return False
+    if "-" not in time_part:
+        return False
+    sh, sm = time_part.split("-")[0].split(":")
+    eh, em = time_part.split("-")[1].split(":")
+    start_min = int(sh) * 60 + int(sm)
+    end_min = int(eh) * 60 + int(em)
+    now_min = now.hour * 60 + now.minute
+    return start_min <= now_min < end_min
+
+
 class MonitorService:
     """B站动态监控服务"""
 
@@ -275,6 +329,17 @@ class MonitorService:
         # 上次凭证刷新时间
         self._last_credential_refresh: float = 0
 
+        # 档位 C：全局 B 站 API 限流器（聚合/legacy 模式均生效）；
+        # 需在评论服务初始化之前创建（评论服务会持有它）
+        self.rate_limiter: BilibiliRateLimiter = build_rate_limiter_from_env()
+
+        # 档位 A + 分层延迟配置
+        self.feed_config: dict = dict(FEED_CONFIG)
+
+        # 延迟总结队列：summarize_mode=deferred 的视频在此累积，由批量 cron 消费
+        # 元素: {"creator": Creator, "item": dict, "video_url": str}
+        self._summary_queue: list = []
+
         # 初始化评论获取服务
         self.comment_fetcher = None
         self._init_comment_fetcher()
@@ -287,7 +352,9 @@ class MonitorService:
         try:
             if not self.credential:
                 self.logger.warning("未配置SESSDATA，评论获取功能可能受限")
-            self.comment_fetcher = CommentFetcher(credential=self.credential)
+            self.comment_fetcher = CommentFetcher(
+                credential=self.credential, rate_limiter=self.rate_limiter
+            )
             self.logger.info("评论获取服务初始化成功")
         except Exception as e:
             self.logger.warning(f"评论获取服务初始化失败: {e}")
@@ -1524,7 +1591,9 @@ class MonitorService:
             u = user.User(uid=uid, credential=self.credential)
 
             # get_dynamics_new 返回 {items: [...], has_more: 1/0, offset: ""}
-            page = await u.get_dynamics_new(offset="")
+            async with self.rate_limiter.guard("feed_space"):
+                page = await u.get_dynamics_new(offset="")
+            self.rate_limiter.record_success("feed_space")
 
             items = page.get("items", []) or []
             if len(items) > limit_recent:
@@ -1537,9 +1606,253 @@ class MonitorService:
                 "offset": page.get("offset"),
             }
 
+        except CircuitOpenError as e:
+            self.logger.warning(f"个人空间流熔断中：{e}")
+            return {"code": -1, "message": str(e)}
         except Exception as e:
+            if self.rate_limiter.classify(e):
+                self.rate_limiter.record_risk("feed_space")
+            else:
+                self.rate_limiter.record_success("feed_space")
             self.logger.error(f"获取用户动态失败: {e}")
             return {"code": -1, "message": str(e)}
+
+    # ==================================================================
+    # 档位 A：聚合动态流（一次请求拉取全部关注博主）
+    # ==================================================================
+    async def fetch_aggregated_feed(
+        self, offset: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """拉取全部关注博主的聚合动态流（单次调用 /feed/all）。
+
+        Returns:
+            与 fetch_user_space_dynamics 同构：{code, data:{items}, has_more, offset}
+        """
+        if not self.credential:
+            return {"code": -1, "message": "未配置SESSDATA，无法拉取聚合动态流"}
+
+        from bilibili_api import dynamic
+
+        try:
+            async with self.rate_limiter.guard("feed_all"):
+                page = await dynamic.get_dynamic_page_info(
+                    credential=self.credential,
+                    _type=dynamic.DynamicType.ALL,
+                    offset=offset,
+                )
+            self.rate_limiter.record_success("feed_all")
+            items = page.get("items", []) or []
+            self.logger.info(
+                f"聚合动态流拉取成功：{len(items)} 条（offset={page.get('offset')!r}）"
+            )
+            return {
+                "code": 0,
+                "data": {"items": items},
+                "has_more": page.get("has_more"),
+                "offset": page.get("offset"),
+            }
+        except CircuitOpenError as e:
+            self.logger.warning(f"聚合流熔断中：{e}")
+            return {"code": -1, "message": str(e)}
+        except Exception as e:
+            self.rate_limiter.record_risk("feed_all") if self.rate_limiter.classify(
+                e
+            ) else self.rate_limiter.record_success("feed_all")
+            self.logger.error(f"获取聚合动态流失败: {e}")
+            return {"code": -1, "message": str(e)}
+
+    @staticmethod
+    def _extract_author_mid(item: Dict[str, Any]) -> Optional[int]:
+        """从聚合流 item 中提取作者 UID（polymer 格式 modules.module_author.mid）。"""
+        try:
+            return int(
+                item.get("modules", {})
+                .get("module_author", {})
+                .get("mid")
+            )
+        except (TypeError, ValueError):
+            return None
+
+    async def process_aggregated_feed(
+        self, creators: List[Creator], once: bool = False
+    ) -> None:
+        """处理一轮聚合动态流：拉取 → 按 UID 过滤 → 复用 _process_dynamic_item 派发。
+
+        Args:
+            creators: 当前生效的创作者列表（按需热重载）
+            once: 是否仅运行一次（启动首次对齐使用）
+        """
+        uid_to_creator: Dict[int, Creator] = {c.uid: c for c in creators}
+        if not uid_to_creator:
+            self.logger.warning("无关注创作者，跳过聚合流处理")
+            return
+
+        data = await self.fetch_aggregated_feed()
+        items = data.get("data", {}).get("items", [])
+        if not items:
+            if data.get("code") != 0:
+                self.logger.warning(
+                    f"聚合流返回错误: code={data.get('code')}, "
+                    f"message={data.get('message')}"
+                )
+                if self.feishu_bot:
+                    try:
+                        await self.feishu_bot.send_system_notification(
+                            self.feishu_bot.LEVEL_WARNING,
+                            "B站API请求失败",
+                            f"获取聚合动态流失败\n\n**错误代码:** {data.get('code')}\n**错误信息:** {data.get('message')}",
+                        )
+                    except Exception:
+                        pass
+            else:
+                self.logger.info("聚合动态流无内容")
+            return
+
+        # 按作者 UID 分组（仅保留关注的博主）
+        grouped: Dict[int, List[Dict[str, Any]]] = {}
+        unseen_mids: set = set()
+        for item in items:
+            mid = self._extract_author_mid(item)
+            if mid is None:
+                continue
+            if mid in uid_to_creator:
+                grouped.setdefault(mid, []).append(item)
+            else:
+                unseen_mids.add(mid)
+
+        # 关注列表校验：关注的 UID 是否都出现在聚合流里
+        missing = set(uid_to_creator) - set(grouped)
+        if missing and self.feishu_bot:
+            try:
+                names = ", ".join(uid_to_creator[m].name for m in missing)
+                await self.feishu_bot.send_system_notification(
+                    self.feishu_bot.LEVEL_WARNING,
+                    "关注列表校验",
+                    f"以下博主在本轮聚合流未出现（可能未在账号关注列表，或本期无动态）：\n{names}",
+                )
+            except Exception:
+                pass
+
+        self.logger.info(
+            f"聚合流过滤：命中 {len(grouped)}/{len(uid_to_creator)} 个关注博主，"
+            f"忽略 {len(unseen_mids)} 个非关注博主"
+        )
+
+        # 对每个命中博主，复用现有派发/去重逻辑
+        for mid, creator_items in grouped.items():
+            creator = uid_to_creator[mid]
+            creator_items.sort(key=self.get_publish_timestamp, reverse=True)
+            await self._dispatch_creator_items(creator, creator_items, once)
+
+    async def _dispatch_creator_items(
+        self,
+        creator: Creator,
+        items: List[Dict[str, Any]],
+        once: bool = False,
+    ) -> None:
+        """对单个博主的聚合流条目执行去重 + 派发（复用 process_creator 的核心逻辑）。
+
+        与 process_creator 的差异：
+        - 数据已由聚合流提供，不再单独拉取个人空间。
+        - 评论轮询仅在该博主有新动态时触发，避免全员每轮翻页。
+        """
+        last_seen = self.state.get_last_seen(creator.uid)
+        if last_seen is None:
+            if not self._allow_backfill_on_start:
+                newest_id = items[0].get("id_str") or items[0].get("id")
+                if newest_id:
+                    self.state.set_last_seen(creator.uid, str(newest_id))
+                    self.state.save()
+                self.logger.info(
+                    f"聚合流首次对齐：{creator.name} 已设置 last_seen，不补发历史"
+                )
+                return
+            self.logger.info(
+                f"聚合流首次监控 {creator.name}（补发模式）"
+            )
+
+        new_items: List[Dict[str, Any]] = []
+        for item in items:
+            did = str(item.get("id_str") or item.get("id"))
+            if not did:
+                continue
+            if did == last_seen:
+                break
+            new_items.append(item)
+
+        if not new_items:
+            return
+
+        self.logger.info(
+            f"{creator.name}: 聚合流发现 {len(new_items)} 条新动态"
+        )
+
+        # 有新动态才触发评论轮询（降低评论 API 负载）
+        if creator.enable_comments and self.comment_fetcher:
+            try:
+                await self._check_recent_pinned_comments(creator, items)
+                await self._poll_creator_comments(creator, items)
+            except Exception as e:
+                self.logger.warning(
+                    f"{creator.name} 评论轮询失败（不影响动态派发）: {e}"
+                )
+
+        new_items.reverse()  # 按时间正序派发（旧→新）
+        had_new = False
+        for item in new_items:
+            try:
+                await self._process_dynamic_item(item, creator)
+                had_new = True
+            except Exception as e:
+                self.logger.error(
+                    f"派发 {creator.name} 动态失败: {e}", exc_info=True
+                )
+
+        if had_new:
+            newest_id = items[0].get("id_str") or items[0].get("id")
+            if newest_id:
+                self.state.set_last_seen(creator.uid, str(newest_id))
+                self.state.save()
+
+    # ==================================================================
+    # 分层延迟：会话窗口与轮询周期计算
+    # ==================================================================
+    def _has_realtime_creator(self, creators: List[Creator]) -> bool:
+        return any(c.latency_tier == "realtime" for c in creators)
+
+    def _in_market_session(self, now: datetime) -> bool:
+        """判断当前是否处于盘中窗口（解析 MARKET_SESSION_WINDOWS）。
+
+        格式示例 "mon-fri 09:15-15:00"，支持 "mon,wed,fri" 或 "mon-fri" 星期段。
+        未启用则返回 False。
+        """
+        if not self.feed_config.get("market_session_enabled", True):
+            return False
+        spec = self.feed_config.get("market_session_windows", "") or ""
+        return _match_session_window(spec, now)
+
+    def _is_quiet_hours(self, now: datetime) -> bool:
+        start = int(self.feed_config.get("quiet_hours_start", 0))
+        end = int(self.feed_config.get("quiet_hours_end", 6))
+        hour = now.hour
+        if start <= end:
+            return start <= hour < end
+        # 跨午夜，如 23-6
+        return hour >= start or hour < end
+
+    def compute_poll_interval(self, creators: List[Creator]) -> int:
+        """根据会话窗口与是否存在 realtime 博主，决定本轮轮询周期（秒）。"""
+        now = datetime.now(self._tz())
+        if self._in_market_session(now) and self._has_realtime_creator(creators):
+            return int(self.feed_config.get("poll_fast_seconds", 90))
+        if self._is_quiet_hours(now):
+            return int(self.feed_config.get("poll_quiet_seconds", 3600))
+        return int(self.feed_config.get("poll_normal_seconds", 600))
+
+    def _tz(self):
+        from zoneinfo import ZoneInfo
+
+        return ZoneInfo(self._SCHEDULER_TIMEZONE)
 
     async def process_creator(self, creator: Creator) -> None:
         """
@@ -1741,7 +2054,16 @@ class MonitorService:
         knowledge_doc_url = None
         try:
             if self.summarizer is not None:
-                if hasattr(self.summarizer, "summarize_video"):
+                # 延迟总结：复盘/总结类视频先发通知，AI 总结进按小时批量队列
+                if getattr(creator, "summarize_mode", "immediate") == "deferred":
+                    self._summary_queue.append(
+                        {"creator": creator, "item": item, "video_url": video_url}
+                    )
+                    self.logger.info(
+                        f"{creator.name}: 视频已加入延迟总结队列（{len(self._summary_queue)} 待处理）"
+                    )
+                    summary_text = "AI 总结将在整点批量生成"
+                elif hasattr(self.summarizer, "summarize_video"):
                     ok, message, result = await self.summarizer.summarize_video(
                         video_url
                     )
@@ -1968,12 +2290,18 @@ class MonitorService:
         self._allow_backfill_on_start = bool(backfill_on_start)
 
         if not self._allow_backfill_on_start:
-            await self._prime_last_seen(creators)
+            # 聚合流模式：首次对齐交给 process_aggregated_feed 的首轮，避免逐博主拉取
+            if self.feed_config.get("mode", "aggregated") != "aggregated":
+                await self._prime_last_seen(creators)
 
         if once:
             # 一次性检查模式
-            for c in creators:
-                await self.process_creator(c)
+            if self.feed_config.get("mode", "aggregated") == "aggregated":
+                self.logger.info("一次性检查（聚合流模式）")
+                await self.process_aggregated_feed(creators, once=True)
+            else:
+                for c in creators:
+                    await self.process_creator(c)
         else:
             # 持续监控模式：使用 APScheduler 统一调度（cron / interval）
             self.logger.info(
@@ -1985,6 +2313,18 @@ class MonitorService:
             # 初始化配置文件监控器（热重载）
             config_watcher = ConfigFileWatcher(self.CREATORS_PATH, check_interval=600)
             config_watcher.initialize()
+
+            if self.feed_config.get("mode", "aggregated") == "aggregated":
+                # 聚合流持续监控：单一定时任务 + 动态周期 + 热重载
+                await self._start_aggregated_mode(
+                    scheduler, config_watcher, creators
+                )
+                try:
+                    await asyncio.Event().wait()
+                except KeyboardInterrupt:
+                    self.logger.info("收到停止信号，正在关闭调度器...")
+                    scheduler.shutdown(wait=False)
+                return
 
             async def _run_creator_job(c: Creator) -> None:
                 await self.process_creator(c)
@@ -2137,6 +2477,153 @@ class MonitorService:
                 self.logger.info("收到停止信号，正在关闭调度器...")
                 scheduler.shutdown(wait=False)
 
+    async def _start_aggregated_mode(
+        self,
+        scheduler: AsyncIOScheduler,
+        config_watcher: "ConfigFileWatcher",
+        creators: List[Creator],
+    ) -> None:
+        """聚合流持续监控：单个轮询任务 + 动态周期 + 热重载 + 凭证/QR 维护。"""
+        self.logger.info(
+            f"启动聚合流监控模式，共 {len(creators)} 个关注创作者"
+        )
+        holder: Dict[str, Any] = {"creators": list(creators)}
+
+        async def _aggregated_loop() -> None:
+            while True:
+                try:
+                    await self.process_aggregated_feed(holder["creators"])
+                except Exception as e:
+                    self.logger.error(
+                        f"聚合流轮询异常: {e}", exc_info=True
+                    )
+                interval = self.compute_poll_interval(holder["creators"])
+                self.logger.debug(f"聚合流下一轮 {interval}s 后执行")
+                await asyncio.sleep(interval)
+
+        async def _check_config_changes() -> None:
+            if not config_watcher.check_for_changes():
+                return
+            new_creators = self.load_creators_from_file()
+            if not new_creators:
+                self.logger.warning("热重载失败：新配置为空，保持当前配置")
+                return
+            if not self._allow_backfill_on_start:
+                # 聚合模式下首轮自动对齐，无需逐博主 prime
+                pass
+            holder["creators"] = new_creators
+            self.logger.info(
+                f"聚合模式热重载完成：{len(new_creators)} 个创作者"
+            )
+            if self.feishu_bot:
+                try:
+                    names = ", ".join(c.name for c in new_creators[:5])
+                    if len(new_creators) > 5:
+                        names += f" 等{len(new_creators)}个"
+                    await self.feishu_bot.send_system_notification(
+                        self.feishu_bot.LEVEL_INFO,
+                        "配置热重载成功",
+                        f"已自动重新加载创作者配置\n\n**当前监控:** {names}",
+                    )
+                except Exception:
+                    pass
+
+        async def _check_credential() -> None:
+            await self._check_and_refresh_credential()
+            await self._poll_qr_login_status()
+
+        async def _poll_qr() -> None:
+            await self._poll_qr_login_status()
+
+        scheduler.add_job(
+            _check_config_changes,
+            trigger="interval",
+            seconds=10,
+            id="config_watcher",
+            max_instances=1,
+            coalesce=True,
+        )
+        asyncio.create_task(_check_credential())
+        scheduler.add_job(
+            _check_credential,
+            trigger="interval",
+            seconds=self._CREDENTIAL_REFRESH_INTERVAL,
+            id="credential_refresh",
+            max_instances=1,
+            coalesce=True,
+        )
+        scheduler.add_job(
+            _poll_qr,
+            trigger="interval",
+            seconds=3,
+            id="qr_poll",
+            max_instances=1,
+            coalesce=True,
+        )
+
+        # 延迟总结批量队列（summarize_mode=deferred 的视频按整点统一总结）
+        summary_cron = self.feed_config.get("summary_batch_cron", "0 * * * *")
+        try:
+            summary_trigger = CronTrigger.from_crontab(
+                summary_cron, timezone=self._SCHEDULER_TIMEZONE
+            )
+            scheduler.add_job(
+                self._drain_summary_queue,
+                trigger=summary_trigger,
+                id="summary_batch",
+                max_instances=1,
+                coalesce=True,
+                replace_existing=True,
+            )
+            self.logger.info(f"延迟总结批量队列已启动（cron: {summary_cron}）")
+        except Exception as e:
+            self.logger.warning(f"延迟总结 cron 注册失败，忽略: {e}")
+
+        scheduler.start()
+        asyncio.create_task(_aggregated_loop())
+
+    async def _drain_summary_queue(self) -> None:
+        """消费延迟总结队列：对 summarize_mode=deferred 的视频做 AI 总结并补发。"""
+        if not self._summary_queue:
+            return
+        batch = self._summary_queue[:]
+        self._summary_queue.clear()
+        self.logger.info(f"延迟总结队列开始处理：{len(batch)} 个视频")
+        for entry in batch:
+            creator = entry["creator"]
+            item = entry["item"]
+            video_url = entry["video_url"]
+            try:
+                vinfo = self.extract_video_info(item)
+                title = vinfo[1] if vinfo else "视频"
+                url = self.DYNAMIC_PC_URL.format(
+                    dynamic_id=str(item.get("id_str") or item.get("id"))
+                )
+                await self._process_video_dynamic_immediate(
+                    item, creator, video_url, title, url
+                )
+            except Exception as e:
+                self.logger.error(
+                    f"延迟总结失败 {creator.name}: {e}", exc_info=True
+                )
+
+    async def _process_video_dynamic_immediate(
+        self,
+        item: Dict[str, Any],
+        creator: Creator,
+        video_url: str,
+        title: str,
+        dynamic_url: str,
+    ) -> None:
+        """对延迟队列中的视频强制立即总结（绕过 summarize_mode）。"""
+        original = creator.summarize_mode
+        try:
+            creator.summarize_mode = "immediate"
+            vinfo = self.extract_video_info(item) or (video_url.rsplit("/", 1)[-1], title)
+            await self._process_video_dynamic(item, vinfo, creator, dynamic_url)
+        finally:
+            creator.summarize_mode = original
+
     async def _prime_last_seen(self, creators: List[Creator]) -> None:
         """启动时对齐每个 UP 的 last_seen 到当前最新，不发送任何通知。
 
@@ -2214,6 +2701,10 @@ class MonitorService:
                     feishu_channel=str(channel).strip() if channel else None,
                     crons=crons,
                     jitter_seconds=jitter_seconds,
+                    latency_tier=str(i.get("latency_tier", "normal") or "normal"),
+                    summarize_mode=str(
+                        i.get("summarize_mode", "immediate") or "immediate"
+                    ),
                 )
                 creators.append(creator)
             return creators

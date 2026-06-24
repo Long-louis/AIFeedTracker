@@ -26,15 +26,40 @@ except ImportError:
 class CommentFetcher:
     """B站评论获取服务"""
 
-    def __init__(self, credential: Optional[Credential] = None):
+    def __init__(self, credential: Optional[Credential] = None, rate_limiter=None):
         """
         初始化评论获取服务
 
         Args:
             credential: B站凭证对象（包含SESSDATA等，用于自动处理WBI签名）
+            rate_limiter: 可选的全局限流器（services.bilibili_rate_limiter.BilibiliRateLimiter）
         """
         self.credential = credential
+        self.rate_limiter = rate_limiter
         self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
+
+    async def _guarded_get_comments(self, **kwargs):
+        """在限流器保护下调用 comment.get_comments（限流器缺失时直接调用）。"""
+        from bilibili_api import comment as comment_mod
+
+        if self.rate_limiter is None:
+            return await comment_mod.get_comments(**kwargs)
+        from services.bilibili_rate_limiter import CircuitOpenError
+
+        try:
+            async with self.rate_limiter.guard("comments"):
+                data = await comment_mod.get_comments(**kwargs)
+            self.rate_limiter.record_success("comments")
+            return data
+        except CircuitOpenError:
+            self.logger.warning("评论接口熔断中，跳过本次获取")
+            return {"replies": [], "hots": [], "upper": {}}
+        except Exception as e:
+            if self.rate_limiter.classify(e):
+                self.rate_limiter.record_risk("comments")
+            else:
+                self.rate_limiter.record_success("comments")
+            raise
 
     async def fetch_hot_comments_with_rules(
         self,
@@ -136,7 +161,7 @@ class CommentFetcher:
             self.logger.info(f"获取视频 {bvid} (aid={aid}) 的评论")
 
             # 获取评论（按热度排序）
-            comment_data = await comment.get_comments(
+            comment_data = await self._guarded_get_comments(
                 oid=aid,
                 type_=CommentResourceType.VIDEO,
                 page_index=1,
@@ -559,7 +584,7 @@ class CommentFetcher:
         page_index: int = 1,
     ) -> List[Dict[str, Any]]:
         """按时间排序拉取评论（支持动态/视频等资源）。"""
-        comment_data = await comment.get_comments(
+        comment_data = await self._guarded_get_comments(
             oid=oid,
             type_=type_,
             page_index=page_index,
@@ -627,7 +652,7 @@ class CommentFetcher:
         - upper.top
         """
 
-        comment_data = await comment.get_comments(
+        comment_data = await self._guarded_get_comments(
             oid=oid,
             type_=type_,
             page_index=1,

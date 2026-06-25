@@ -148,6 +148,10 @@ def load_feed_config() -> dict:
         "poll_normal_seconds": _get_env_int("FEED_POLL_NORMAL_SECONDS", 600),
         "poll_quiet_seconds": _get_env_int("FEED_POLL_QUIET_SECONDS", 3600),
         "poll_jitter_ratio": _get_env_int("FEED_POLL_JITTER_PCT", 25) / 100.0,
+        # 聚合流单次最多翻页数（避免漏检被挤出首页的关注博主动态）
+        "feed_max_pages": _get_env_int("FEED_MAX_PAGES", 5),
+        # 评论轮询解耦循环基准间隔（秒）；仍受逐博主 comment_poll_interval_seconds 节流
+        "comment_loop_seconds": _get_env_int("FEED_COMMENT_LOOP_SECONDS", 600),
         "market_session_enabled": _get_env_bool("MARKET_SESSION_ENABLED", True),
         # 盘中窗口，如 "mon-fri 09:15-15:00"
         "market_session_windows": _get_env_str(

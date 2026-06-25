@@ -1687,42 +1687,62 @@ class MonitorService:
             self.logger.warning("无关注创作者，跳过聚合流处理")
             return
 
-        data = await self.fetch_aggregated_feed()
-        items = data.get("data", {}).get("items", [])
-        if not items:
-            if data.get("code") != 0:
-                self.logger.warning(
-                    f"聚合流返回错误: code={data.get('code')}, "
-                    f"message={data.get('message')}"
-                )
-                if self.feishu_bot:
-                    try:
-                        await self.feishu_bot.send_system_notification(
-                            self.feishu_bot.LEVEL_WARNING,
-                            "B站API请求失败",
-                            f"获取聚合动态流失败\n\n**错误代码:** {data.get('code')}\n**错误信息:** {data.get('message')}",
-                        )
-                    except Exception:
-                        pass
-            else:
-                self.logger.info("聚合动态流无内容")
-            return
-
-        # 按作者 UID 分组（仅保留关注的博主）
+        # 分页拉取聚合流，确保关注博主的新动态不被挤出首页而漏检。
+        # 翻页终止条件：has_more=False / 达到 feed_max_pages / 所有已出现的关注博主
+        # 都已"满足"（分组中已遇到其 last_seen，表示新动态收齐）。
+        max_pages = int(self.feed_config.get("feed_max_pages", 5))
         grouped: Dict[int, List[Dict[str, Any]]] = {}
         unseen_mids: set = set()
-        for item in items:
-            mid = self._extract_author_mid(item)
-            if mid is None:
-                continue
-            if mid in uid_to_creator:
-                grouped.setdefault(mid, []).append(item)
-            else:
-                unseen_mids.add(mid)
+        offset: Optional[str] = None
+        first_error: Optional[Dict[str, Any]] = None
+        pages = 0
+        while pages < max_pages:
+            pages += 1
+            data = await self.fetch_aggregated_feed(offset=offset)
+            page_items = data.get("data", {}).get("items", [])
+            if data.get("code") != 0:
+                if pages == 1:
+                    first_error = data
+                break
+            if not page_items:
+                break
+            for item in page_items:
+                mid = self._extract_author_mid(item)
+                if mid is None:
+                    continue
+                if mid in uid_to_creator:
+                    grouped.setdefault(mid, []).append(item)
+                else:
+                    unseen_mids.add(mid)
+            if self._aggregated_creators_satisfied(grouped):
+                break
+            has_more = data.get("has_more")
+            offset = data.get("offset")
+            if not has_more or not offset:
+                break
+
+        if first_error is not None and not grouped:
+            self.logger.warning(
+                f"聚合流返回错误: code={first_error.get('code')}, "
+                f"message={first_error.get('message')}"
+            )
+            if self.feishu_bot:
+                try:
+                    await self.feishu_bot.send_system_notification(
+                        self.feishu_bot.LEVEL_WARNING,
+                        "B站API请求失败",
+                        f"获取聚合动态流失败\n\n**错误代码:** {first_error.get('code')}\n**错误信息:** {first_error.get('message')}",
+                    )
+                except Exception:
+                    pass
+            return
+
+        if not grouped:
+            self.logger.info("聚合动态流无关注博主内容")
+            return
 
         # 关注列表校验：未出现在本轮聚合流的关注博主。
         # 注意：未出现通常只是"本期无动态"，属正常现象，不发飞书告警，避免刷屏。
-        # 真正的"未关注"问题应靠启动期校验或长期统计判断，而非每轮。
         missing = set(uid_to_creator) - set(grouped)
         if missing:
             self.logger.debug(
@@ -1732,7 +1752,7 @@ class MonitorService:
 
         self.logger.info(
             f"聚合流过滤：命中 {len(grouped)}/{len(uid_to_creator)} 个关注博主，"
-            f"忽略 {len(unseen_mids)} 个非关注博主"
+            f"忽略 {len(unseen_mids)} 个非关注博主（翻 {pages} 页）"
         )
 
         # 对每个命中博主，复用现有派发/去重逻辑
@@ -1740,6 +1760,26 @@ class MonitorService:
             creator = uid_to_creator[mid]
             creator_items.sort(key=self.get_publish_timestamp, reverse=True)
             await self._dispatch_creator_items(creator, creator_items, once)
+
+    def _aggregated_creators_satisfied(
+        self, grouped: Dict[int, List[Dict[str, Any]]]
+    ) -> bool:
+        """所有已出现且有 last_seen 的关注博主，是否都已在分组中遇到 last_seen。
+
+        即其"新动态已全部收齐"，无需继续翻页。首次对齐（无 last_seen）的博主
+        不参与判断。
+        """
+        for mid, items in grouped.items():
+            last_seen = self.state.get_last_seen(mid)
+            if last_seen is None:
+                continue
+            if not any(
+                str(it.get("id_str") or it.get("id")) == last_seen
+                for it in items
+            ):
+                return False
+        return True
+
 
     async def _dispatch_creator_items(
         self,
@@ -1784,15 +1824,8 @@ class MonitorService:
             f"{creator.name}: 聚合流发现 {len(new_items)} 条新动态"
         )
 
-        # 有新动态才触发评论轮询（降低评论 API 负载）
-        if creator.enable_comments and self.comment_fetcher:
-            try:
-                await self._check_recent_pinned_comments(creator, items)
-                await self._poll_creator_comments(creator, items)
-            except Exception as e:
-                self.logger.warning(
-                    f"{creator.name} 评论轮询失败（不影响动态派发）: {e}"
-                )
+        # 评论轮询已解耦为独立慢循环（_comment_poll_loop），见 _start_aggregated_mode，
+        # 这里只负责动态派发，避免漏检"博主在老视频下新发评论"。
 
         new_items.reverse()  # 按时间正序派发（旧→新）
         had_new = False
@@ -2594,6 +2627,42 @@ class MonitorService:
 
         scheduler.start()
         asyncio.create_task(_aggregated_loop())
+        # 评论轮询解耦：仅针对 enable_comments 博主，按自身慢节奏单独拉动态+轮询，
+        # 不依赖聚合流是否命中该博主，避免漏检"博主在老视频下新发评论"。
+        asyncio.create_task(self._comment_poll_loop(holder))
+
+    async def _comment_poll_loop(self, holder: Dict[str, Any]) -> None:
+        """独立慢循环：对 enable_comments 博主单独拉取近期动态并轮询评论。
+
+        与聚合流解耦——聚合流只保证动态检测，评论追踪需要博主自身的完整近期动态
+        （含聚合流可能未覆盖的老动态），故这里用 /feed/space 按博主拉取。
+        受 comment_poll_interval_seconds 逐博主节流，并通过全局限流器。
+        """
+        base_interval = int(self.feed_config.get("comment_loop_seconds", 600))
+        while True:
+            try:
+                comment_creators = [
+                    c for c in holder["creators"] if c.enable_comments
+                ]
+                for creator in comment_creators:
+                    try:
+                        data = await self.fetch_user_space_dynamics(
+                            creator.uid, 20
+                        )
+                        items = data.get("data", {}).get("items", [])
+                        if not items:
+                            continue
+                        await self._check_recent_pinned_comments(creator, items)
+                        await self._poll_creator_comments(creator, items)
+                    except Exception as e:
+                        self.logger.warning(
+                            f"{creator.name} 评论轮询失败: {e}"
+                        )
+            except Exception as e:
+                self.logger.error(
+                    f"评论轮询循环异常: {e}", exc_info=True
+                )
+            await asyncio.sleep(self._jittered_interval(base_interval))
 
     async def _drain_summary_queue(self) -> None:
         """消费延迟总结队列：对 summarize_mode=deferred 的视频做 AI 总结并补发。"""

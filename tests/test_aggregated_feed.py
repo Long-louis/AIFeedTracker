@@ -204,6 +204,55 @@ class TestAggregatedDispatch(unittest.IsolatedAsyncioTestCase):
         # 只为 A 派发（B 无新动态由 _dispatch_creator_items 内部判断）
         self.assertEqual(self.svc._dispatch_creator_items.await_count, 2)
 
+    def test_creators_satisfied_empty(self):
+        self.assertTrue(self.svc._aggregated_creators_satisfied({}))
+
+    def test_creators_satisfied_when_lastseen_present(self):
+        # 分组里含 last_seen id -> 满足
+        self._prime(100, 200)
+        grouped = {100: [_make_item(300, 100, "A"), _make_item(200, 100, "A")]}
+        self.assertTrue(self.svc._aggregated_creators_satisfied(grouped))
+
+    def test_creators_satisfied_when_lastseen_missing(self):
+        # 分组里没有 last_seen -> 未满足，需翻页
+        self._prime(100, 10)
+        grouped = {100: [_make_item(300, 100, "A"), _make_item(200, 100, "A")]}
+        self.assertFalse(self.svc._aggregated_creators_satisfied(grouped))
+
+    def test_creators_satisfied_first_run_no_lastseen(self):
+        # 首次对齐（无 last_seen）的博主不参与判断
+        grouped = {100: [_make_item(300, 100, "A")]}
+        self.assertTrue(self.svc._aggregated_creators_satisfied(grouped))
+
+    async def test_pagination_continues_until_satisfied(self):
+        creators = [Creator(uid=100, name="A")]
+        self._prime(100, 1)  # last_seen 很旧，需翻页直到遇到 id=1
+        page1 = [_make_item(30, 100, "A"), _make_item(20, 100, "A")]
+        page2 = [_make_item(10, 100, "A"), _make_item(1, 100, "A")]
+        self.svc.fetch_aggregated_feed = AsyncMock(
+            side_effect=[
+                {"code": 0, "data": {"items": page1}, "has_more": True, "offset": "x"},
+                {"code": 0, "data": {"items": page2}, "has_more": False, "offset": None},
+            ]
+        )
+        self.svc._dispatch_creator_items = AsyncMock()
+        await self.svc.process_aggregated_feed(creators)
+        self.assertEqual(self.svc.fetch_aggregated_feed.await_count, 2)
+
+    async def test_dispatch_does_not_poll_comments(self):
+        # 评论轮询已从 _dispatch_creator_items 解耦
+        creator = Creator(uid=100, name="UP", enable_comments=True)
+        items = [_make_item(300, 100, "UP"), _make_item(200, 100, "UP")]
+        self._prime(100, 200)
+        self.svc._process_dynamic_item = AsyncMock()
+        self.svc._poll_creator_comments = AsyncMock()
+        self.svc._check_recent_pinned_comments = AsyncMock()
+        self.svc.comment_fetcher = object()
+        await self.svc._dispatch_creator_items(creator, items)
+        self.svc._poll_creator_comments.assert_not_awaited()
+        self.svc._check_recent_pinned_comments.assert_not_awaited()
+
+
 
 class TestRateLimiter(unittest.IsolatedAsyncioTestCase):
     async def test_throttle_enforces_min_interval(self):

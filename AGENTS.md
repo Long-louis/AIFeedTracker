@@ -12,7 +12,7 @@
 
 - `aggregated`（默认，推荐）：单轮询器调聚合接口 `/feed/all`（`fetch_aggregated_feed` `services/monitor.py:1623`），**一次请求拉全部关注博主动态**，按 UID 过滤后复用 `_process_dynamic_item` 派发。调用数与博主数解耦。
 - `legacy`：逐博主 cron 轮询个人空间接口 `/feed/space`（风控更严，社区 issue #1012 明确推荐多 UID 用聚合流）。
-- 轮询周期纯按时间窗口：盘中快 / 收盘正常 / 深夜静默，并叠加 ±25% 随机抖动降风控：`compute_poll_interval` `services/monitor.py:1873`。
+- 轮询周期纯按时间窗口：盘中快（~300s）/ 收盘正常 / 深夜静默，并叠加 ±25% 随机抖动降风控：`compute_poll_interval` `services/monitor.py:1873`。
 - 聚合流分页：`process_aggregated_feed` 翻页直到关注博主新动态收齐（`feed_max_pages` 上限），避免被非关注动态挤出首页漏检。
 - 全局限流器 `services/bilibili_rate_limiter.py`：令牌桶 + 并发信号量 + 风控码(-352/-101/-403/412)退避 + 熔断，覆盖聚合流/空间流/评论接口。
 

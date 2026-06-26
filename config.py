@@ -144,7 +144,7 @@ def load_feed_config() -> dict:
     return {
         # aggregated=聚合流（每轮 1 次调用拉全部关注）；legacy=逐博主轮询（旧逻辑）
         "mode": _get_env_str("FEED_MODE", "aggregated"),
-        "poll_fast_seconds": _get_env_int("FEED_POLL_FAST_SECONDS", 90),
+        "poll_fast_seconds": _get_env_int("FEED_POLL_FAST_SECONDS", 300),
         "poll_normal_seconds": _get_env_int("FEED_POLL_NORMAL_SECONDS", 600),
         "poll_quiet_seconds": _get_env_int("FEED_POLL_QUIET_SECONDS", 3600),
         "poll_jitter_ratio": _get_env_int("FEED_POLL_JITTER_PCT", 25) / 100.0,

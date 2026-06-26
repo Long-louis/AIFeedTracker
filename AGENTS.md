@@ -6,13 +6,14 @@
 
 - CLI 与服务生命周期：`main.py:203`，支持 `--mode monitor|service|test`。
 - 监控编排：`MonitorService`（`services/monitor.py:267`），状态去重 `JsonState`（`services/monitor.py:146`）。
-- 知识库写入是附加能力，失败只记录、不阻断卡片发送：`services/monitor.py:2042`（`_process_video_dynamic`）。
+- 知识库写入是附加能力，失败只记录、不阻断卡片发送：`services/monitor.py:2075`（`_process_video_dynamic`）。
 
 ## 监控架构（两种模式，由 `FEED_MODE` 决定）
 
 - `aggregated`（默认，推荐）：单轮询器调聚合接口 `/feed/all`（`fetch_aggregated_feed` `services/monitor.py:1623`），**一次请求拉全部关注博主动态**，按 UID 过滤后复用 `_process_dynamic_item` 派发。调用数与博主数解耦。
 - `legacy`：逐博主 cron 轮询个人空间接口 `/feed/space`（风控更严，社区 issue #1012 明确推荐多 UID 用聚合流）。
-- 轮询周期纯按时间窗口：盘中快 / 收盘正常 / 深夜静默，并叠加 ±25% 随机抖动降风控：`compute_poll_interval` `services/monitor.py:1840`。
+- 轮询周期纯按时间窗口：盘中快 / 收盘正常 / 深夜静默，并叠加 ±25% 随机抖动降风控：`compute_poll_interval` `services/monitor.py:1873`。
+- 聚合流分页：`process_aggregated_feed` 翻页直到关注博主新动态收齐（`feed_max_pages` 上限），避免被非关注动态挤出首页漏检。
 - 全局限流器 `services/bilibili_rate_limiter.py`：令牌桶 + 并发信号量 + 风控码(-352/-101/-403/412)退避 + 熔断，覆盖聚合流/空间流/评论接口。
 
 - 评论轮询已解耦为独立慢循环（`_comment_poll_loop`），仅针对 `enable_comments` 博主按自身节奏单独拉动态+轮询，与聚合流动态检测互不影响（聚合流单页可能不含该博主完整动态）。
@@ -64,7 +65,7 @@
 - ASR 回退默认外部 SenseVoice API：`LOCAL_ASR_PROVIDER=sensevoice_api`、`ASR_API_URL=.../v1/transcribe`。
 - 不提交：`data/bilibili_state.json`、`data/feishu_doc_state.json`、`data/bilibili_auth.json`、`data/bilibili_creators.json`、`data/feishu_channels.json`、`.env`。
 - `opencode.jsonc` 和 `.opencode/` 是本机 OpenCode 配置（已忽略），不作运行时代码提交。
-- Docker 镜像依赖安装走 `uv export` 生成 requirements：`Dockerfile:43`、`Dockerfile.gpu:49`。
+- Docker 镜像依赖安装走 `uv export` 生成 requirements：`Dockerfile:44`、`Dockerfile.gpu:50`。
 - 热重载：`services/monitor.py` 用 `ConfigFileWatcher` 每 10 秒热重载 `data/bilibili_creators.json`。
 
 ## Additional Documentation

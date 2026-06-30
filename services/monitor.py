@@ -1761,22 +1761,39 @@ class MonitorService:
             creator_items.sort(key=self.get_publish_timestamp, reverse=True)
             await self._dispatch_creator_items(creator, creator_items, once)
 
+    def _is_newer_dynamic(self, did: str, last_seen: str) -> bool:
+        """did 是否比 last_seen 新。
+
+        B 站动态 id 是单调递增的雪花 id（越大越新），直接数值比较即可，
+        无需依赖 last_seen 那条动态恰好出现在当前 feed 页里——这正是早期
+        "精确匹配 break" 在长间隔轮询（last_seen 被挤出分页窗口）时误判重发
+        的根因。
+        """
+        try:
+            return int(did) > int(last_seen)
+        except (ValueError, TypeError):
+            # 非数值 id 退化为不等判断
+            return did != last_seen
+
     def _aggregated_creators_satisfied(
         self, grouped: Dict[int, List[Dict[str, Any]]]
     ) -> bool:
-        """所有已出现且有 last_seen 的关注博主，是否都已在分组中遇到 last_seen。
+        """所有已出现且有 last_seen 的关注博主，是否都已翻过"新动态边界"。
 
-        即其"新动态已全部收齐"，无需继续翻页。首次对齐（无 last_seen）的博主
-        不参与判断。
+        即分组里已出现 id <= last_seen 的项（其后皆为已见旧动态），无需继续翻页。
+        首次对齐（无 last_seen）的博主不参与判断。
         """
         for mid, items in grouped.items():
             last_seen = self.state.get_last_seen(mid)
             if last_seen is None:
                 continue
-            if not any(
-                str(it.get("id_str") or it.get("id")) == last_seen
+            crossed = any(
+                not self._is_newer_dynamic(
+                    str(it.get("id_str") or it.get("id")), last_seen
+                )
                 for it in items
-            ):
+            )
+            if not crossed:
                 return False
         return True
 
@@ -1813,7 +1830,8 @@ class MonitorService:
             did = str(item.get("id_str") or item.get("id"))
             if not did:
                 continue
-            if did == last_seen:
+            if not self._is_newer_dynamic(did, last_seen):
+                # items 已按时间倒序，遇到不比 last_seen 新的即可停止（其后皆更旧）
                 break
             new_items.append(item)
 

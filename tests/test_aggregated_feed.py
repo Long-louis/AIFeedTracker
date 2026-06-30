@@ -252,6 +252,30 @@ class TestAggregatedDispatch(unittest.IsolatedAsyncioTestCase):
         self.svc._poll_creator_comments.assert_not_awaited()
         self.svc._check_recent_pinned_comments.assert_not_awaited()
 
+    async def test_dispatch_no_republish_when_lastseen_buried(self):
+        # 回归：last_seen 被挤出分页窗口（不在 items 里）时，
+        # 旧"精确匹配 break" 会把已推过的旧动态当新动态重发；
+        # 数值 id 比较只派发真正更新的。
+        creator = Creator(uid=100, name="UP")
+        # last_seen=750 不在 items 中，且 700/600 都比它旧（已推过）
+        self._prime(100, 750)
+        items = [_make_item(800, 100, "UP"), _make_item(700, 100, "UP"),
+                 _make_item(600, 100, "UP")]
+        self.svc._process_dynamic_item = AsyncMock()
+        await self.svc._dispatch_creator_items(creator, items)
+        # 只有 800 比 last_seen(750) 新，应只派发 1 条
+        self.assertEqual(self.svc._process_dynamic_item.await_count, 1)
+
+    async def test_dispatch_republishes_all_when_truly_new(self):
+        # last_seen 很旧，items 全部更新 -> 全部派发（正确行为）
+        creator = Creator(uid=100, name="UP")
+        self._prime(100, 500)
+        items = [_make_item(800, 100, "UP"), _make_item(700, 100, "UP")]
+        self.svc._process_dynamic_item = AsyncMock()
+        await self.svc._dispatch_creator_items(creator, items)
+        self.assertEqual(self.svc._process_dynamic_item.await_count, 2)
+
+
 
 
 class TestRateLimiter(unittest.IsolatedAsyncioTestCase):

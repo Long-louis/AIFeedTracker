@@ -126,6 +126,28 @@ class TestComputePollInterval(unittest.IsolatedAsyncioTestCase):
             self.assertGreaterEqual(v, 75.0)
             self.assertLessEqual(v, 125.0)
 
+    def test_interval_capped_before_window_start(self):
+        # 回归：9:13（窗口 9:15 前两分钟）不应睡正常档 600s，而应截断到窗口起点
+        tz = ZoneInfo("Asia/Shanghai")
+        creators = [Creator(uid=1, name="a")]
+        with patch.object(self.svc, "_tz", lambda: tz):
+            with patch("services.monitor.datetime", wraps=datetime) as mock_dt:
+                mock_dt.now.return_value = datetime(2026, 6, 23, 9, 13, tzinfo=tz)
+                interval = self.svc.compute_poll_interval(creators)
+        self.assertLess(interval, 300)
+
+    def test_cap_unchanged_when_window_far(self):
+        tz = ZoneInfo("Asia/Shanghai")
+        now = datetime(2026, 6, 23, 16, 0, tzinfo=tz)  # 周二盘后，下个窗口在明天
+        self.assertEqual(self.svc._cap_to_next_session(600, now), 600)
+
+    def test_cap_truncates_when_window_soon(self):
+        tz = ZoneInfo("Asia/Shanghai")
+        now = datetime(2026, 6, 23, 9, 13, tzinfo=tz)  # 窗口前 2 分钟
+        val = self.svc._cap_to_next_session(3600, now)
+        self.assertLess(val, 3600)
+        self.assertGreater(val, 0)
+
 
 class TestAggregatedDispatch(unittest.IsolatedAsyncioTestCase):
     def setUp(self):

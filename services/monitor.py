@@ -264,6 +264,35 @@ def _match_session_window(spec: str, now: datetime) -> bool:
     return start_min <= now_min < end_min
 
 
+def _next_session_start(spec: str, now: datetime) -> Optional[datetime]:
+    """返回从 now 起最近一个盘口窗口起点（今天或未来数天内），无配置返回 None。
+
+    用于在窗口外把轮询间隔截断到窗口起点，避免"睡过窗口边界"——例如 9:13
+    （窗口外）若按正常档睡 3600s 会错过 9:15 的快档切换。
+    """
+    spec = (spec or "").strip().lower()
+    if not spec:
+        return None
+    parts = spec.split()
+    if len(parts) != 2:
+        return None
+    dow_part, time_part = parts
+    allowed_dows = set(_parse_dow_token(dow_part))
+    if not allowed_dows or "-" not in time_part:
+        return None
+    sh, sm = time_part.split("-")[0].split(":")
+    start_h, start_m = int(sh), int(sm)
+    # 搜索未来 8 天内最近且晚于 now 的窗口起点
+    for day_offset in range(0, 9):
+        d = now.date() + timedelta(days=day_offset)
+        candidate = datetime(
+            d.year, d.month, d.day, start_h, start_m, tzinfo=now.tzinfo
+        )
+        if candidate.weekday() in allowed_dows and candidate > now:
+            return candidate
+    return None
+
+
 class MonitorService:
     """B站动态监控服务"""
 
@@ -1893,13 +1922,33 @@ class MonitorService:
 
         聚合流为单轮询器，无法给单个博主更低延迟，故不再依赖 per-creator realtime。
         盘口窗口内走快周期，深夜走静默周期，其余正常周期。
+        窗口外时，若窗口将在本周期内开始，则截断到窗口起点，避免睡过边界。
         """
         now = datetime.now(self._tz())
         if self._in_market_session(now):
-            return int(self.feed_config.get("poll_fast_seconds", 90))
+            return int(self.feed_config.get("poll_fast_seconds", 300))
         if self._is_quiet_hours(now):
-            return int(self.feed_config.get("poll_quiet_seconds", 3600))
-        return int(self.feed_config.get("poll_normal_seconds", 600))
+            base = int(self.feed_config.get("poll_quiet_seconds", 3600))
+        else:
+            base = int(self.feed_config.get("poll_normal_seconds", 600))
+        return self._cap_to_next_session(base, now)
+
+    def _cap_to_next_session(self, base: int, now: datetime) -> int:
+        """窗口外时，把周期截断到下一个盘口窗口起点（不晚于 base）。
+
+        例如 9:13（窗口外，base=3600s），窗口 9:15 开始 -> 截断到 ~180s，
+        确保服务在窗口起点附近醒来并切换到快档，而非睡到 10:13。
+        """
+        spec = self.feed_config.get("market_session_windows", "") or ""
+        nxt = _next_session_start(spec, now)
+        if nxt is None:
+            return base
+        delta = int((nxt - now).total_seconds())
+        if 0 < delta < base:
+            # 留 60s 缓冲，配合后续 ±25% 抖动仍能落在窗口起点之后
+            return max(delta + 60, 60)
+        return base
+
 
     def _jittered_interval(self, base: int) -> float:
         """给轮询间隔加随机抖动（±25%），避免固定周期成为风控指纹。"""

@@ -131,10 +131,14 @@ AI_CONFIG = {
     "model": os.getenv("AI_MODEL"),  # 可选，不设置则根据service自动选择
     # 适配长视频总结：按模型上下文窗口做 token 预算（DeepSeek 文档：128K）
     "context_window_tokens": int(os.getenv("AI_CONTEXT_WINDOW_TOKENS", "128000")),
-    # DeepSeek-chat 默认 max output 4K（可在 .env 覆盖；若你开到 8K 也可写 8000）
-    "max_output_tokens": int(os.getenv("AI_MAX_OUTPUT_TOKENS", "4000")),
-    # 分段(map)阶段每段输出 token 上限
-    "map_max_output_tokens": int(os.getenv("AI_MAP_MAX_OUTPUT_TOKENS", "900")),
+    # 推理模型(deepseek-v4-flash)的 reasoning tokens 也计入 max_tokens，
+    # 4000 不够时 content 返回 null。提升到 8000 留足 reasoning 预算。
+    "max_output_tokens": int(os.getenv("AI_MAX_OUTPUT_TOKENS", "8000")),
+    # 分段(map)阶段每段输出 token 上限（推理模型需要更大预算）
+    "map_max_output_tokens": int(os.getenv("AI_MAP_MAX_OUTPUT_TOKENS", "2000")),
+    # DeepSeek V4 推理强度: low/high/max。视频总结用 low 即可，
+    # 减少 reasoning token 消耗，降低成本，避免 content 为空。
+    "reasoning_effort": os.getenv("AI_REASONING_EFFORT", "low"),
     # tiktoken 编码名（DeepSeek OpenAI-compat 通常可用 cl100k_base；如你确认其它编码可覆盖）
     "token_encoding": os.getenv("AI_TOKEN_ENCODING", "cl100k_base"),
 }
@@ -173,7 +177,8 @@ FEED_CONFIG = load_feed_config()
 ANTI_BAN_CONFIG = {
     "user_agent": USER_AGENT,  # 使用配置的User-Agent
     "request_delay": (1, 3),  # 请求间隔（秒）
-    "timeout": 30,
+    "timeout": 30,  # 常规API请求超时
+    "audio_download_timeout": 120,  # 音频文件下载超时（大文件需要更长）
 }
 
 

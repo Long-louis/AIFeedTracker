@@ -71,6 +71,7 @@ class AISummaryService:
                 api_key=api_key,
                 base_url=AI_CONFIG.get("base_url"),
                 model=AI_CONFIG.get("model"),
+                reasoning_effort=AI_CONFIG.get("reasoning_effort"),
             )
 
             self.summary_generator = SummaryGenerator(self.ai_client)
